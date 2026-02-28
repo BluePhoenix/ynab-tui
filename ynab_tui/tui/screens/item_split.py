@@ -12,6 +12,7 @@ from ...models import Transaction
 from ...services import CategorizerService
 from ...services.categorizer import SplitModificationError
 from ..constants import VIM_NAVIGATION_BINDINGS
+from ..layout import SplitColumnWidths, calculate_split_column_widths
 from ..modals import CategoryPickerModal, CategorySelection, TransactionSummary
 
 
@@ -23,24 +24,27 @@ class SplitItemListItem(ListItem):
         item: dict,
         index: int,
         assigned_category: Optional[dict] = None,
+        column_widths: Optional[SplitColumnWidths] = None,
     ) -> None:
         super().__init__()
         self.item = item
         self.index = index
         self.assigned_category = assigned_category
+        self._column_widths = column_widths or SplitColumnWidths()
 
     def compose(self) -> ComposeResult:
         yield Static(self._format_row())
 
     def _format_row(self) -> str:
         """Format the item row display."""
+        w = self._column_widths
         name = self.item.get("item_name", "Unknown Item")
         price = self.item.get("item_price", 0) or 0
         quantity = self.item.get("quantity", 1) or 1
 
-        # Truncate name to ~40 chars
-        if len(name) > 40:
-            name = name[:37] + "..."
+        # Truncate name to fit column width
+        if len(name) > w.item_name:
+            name = name[: w.item_name - 3] + "..."
 
         # Format price
         price_str = f"${price:.2f}"
@@ -51,13 +55,16 @@ class SplitItemListItem(ListItem):
         # Status indicator and category
         if self.assigned_category:
             status = "[✓]"
-            cat_name = self.assigned_category.get("category_name", "")[:20]
+            cat_name = self.assigned_category.get("category_name", "")
+            if len(cat_name) > w.category:
+                cat_name = cat_name[: w.category - 3] + "..."
             cat_str = f"[green]{cat_name}[/green]"
         else:
             status = "[ ]"
             cat_str = "[dim]uncategorized[/dim]"
 
-        return f"{status} {name:<40}  {qty_str:>3}  {price_str:>8}  {cat_str}"
+        sp = " " * w.col_spacing
+        return f"{status}{sp}{name:<{w.item_name}}{sp}{qty_str:>{w.quantity}}{sp}{price_str:>{w.price}}{sp}{cat_str}"
 
     def update_category(self, category: Optional[dict]) -> None:
         """Update the assigned category and refresh display."""
@@ -210,6 +217,7 @@ class ItemSplitScreen(ModalScreen[bool]):
 
     def on_mount(self) -> None:
         """Populate the items list on mount."""
+        self._column_widths = calculate_split_column_widths(self.app.size.width)
         self._populate_list()
         self._update_summary()
 
@@ -220,7 +228,7 @@ class ItemSplitScreen(ModalScreen[bool]):
 
         for i, item in enumerate(self._items):
             assigned = self._assignments.get(i)
-            list_item = SplitItemListItem(item, i, assigned)
+            list_item = SplitItemListItem(item, i, assigned, self._column_widths)
             list_view.append(list_item)
 
         if self._items:

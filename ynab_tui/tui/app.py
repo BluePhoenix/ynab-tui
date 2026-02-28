@@ -38,6 +38,7 @@ from .state import (
     FilterStateMachine,
     TagManager,
     TagState,
+    should_remove_from_filter,
 )
 
 
@@ -730,6 +731,26 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
             pass  # Widget not mounted yet, safe to ignore
         return None
 
+    def _remove_current_from_list(self, txn: Transaction) -> None:
+        """Remove current item from ListView and in-memory cache.
+
+        Used when a mutation causes a transaction to no longer match
+        the active filter (e.g., approving in unapproved view).
+        """
+        try:
+            txn_list = self.query_one("#transactions-list", ListView)
+            current_index = txn_list.index
+            if current_index is not None and txn_list.highlighted_child:
+                txn_list.highlighted_child.remove()
+                # Remove from in-memory transaction list
+                self._transactions.transactions[:] = [
+                    t for t in self._transactions.transactions if t.id != txn.id
+                ]
+                # Update status bar count
+                self._restore_status_bar()
+        except NoMatches:
+            pass
+
     def _get_categories_for_picker(self) -> list[dict]:
         """Get categories formatted for the picker modal."""
         categories = []
@@ -835,16 +856,24 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
             self.notify(action_result.error or "Failed to categorize", severity="error")
             return
 
-        # Update just the selected item in the ListView (not full rebuild)
-        try:
-            txn_list = self.query_one("#transactions-list", ListView)
-            if txn_list.highlighted_child:
-                item = txn_list.highlighted_child
-                if isinstance(item, TransactionListItem):
-                    item.update_content()  # Update the Static widget's text
-        except Exception:
-            # Fallback to full re-render if something goes wrong
-            self.run_worker(self._render_transactions, exclusive=True)  # type: ignore[arg-type]
+        # Check if transaction should be removed from filtered view
+        if should_remove_from_filter(
+            self._filter_state,
+            approved=txn.approved,
+            has_category=txn.category_id is not None,
+            sync_status=txn.sync_status,
+        ):
+            self._remove_current_from_list(txn)
+        else:
+            # Update just the selected item in the ListView (not full rebuild)
+            try:
+                txn_list = self.query_one("#transactions-list", ListView)
+                if txn_list.highlighted_child:
+                    item = txn_list.highlighted_child
+                    if isinstance(item, TransactionListItem):
+                        item.update_content()
+            except Exception:
+                self.run_worker(self._render_transactions, exclusive=True)  # type: ignore[arg-type]
 
     def _on_bulk_category_selected(self, result: Optional[CategorySelection]) -> None:
         """Handle category selection for bulk tagging."""
@@ -1061,16 +1090,25 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
 
         if action_result.success:
             self.notify(action_result.message)
-            # Update list item visually
-            try:
-                txn_list = self.query_one("#transactions-list", ListView)
-                if txn_list.highlighted_child:
-                    item = txn_list.highlighted_child
-                    if isinstance(item, TransactionListItem):
-                        item.update_content()
-            except Exception:
-                # Fallback to full re-render
-                self.run_worker(self._render_transactions, exclusive=True)  # type: ignore[arg-type]
+            # Check if transaction should be removed from filtered view
+            if should_remove_from_filter(
+                self._filter_state,
+                approved=txn.approved,
+                has_category=txn.category_id is not None,
+                sync_status=txn.sync_status,
+            ):
+                self._remove_current_from_list(txn)
+            else:
+                # Update list item visually
+                try:
+                    txn_list = self.query_one("#transactions-list", ListView)
+                    if txn_list.highlighted_child:
+                        item = txn_list.highlighted_child
+                        if isinstance(item, TransactionListItem):
+                            item.update_content()
+                except Exception:
+                    # Fallback to full re-render
+                    self.run_worker(self._render_transactions, exclusive=True)  # type: ignore[arg-type]
         else:
             self.notify(action_result.error or "Failed to undo", severity="error")
 
@@ -1088,8 +1126,8 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
             # Clear all tags
             self._tag_state = TagManager.clear_all(self._tag_state)
 
-            # Refresh display
-            self.run_worker(self._render_transactions, exclusive=True)  # type: ignore[arg-type]
+            # Refresh display (re-query to apply filter)
+            self.run_worker(self._load_transactions, exclusive=True)  # type: ignore[arg-type]
             self.notify(action_result.message)
         else:
             # Single item mode
@@ -1107,16 +1145,24 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
 
             if action_result.success:
                 self.notify(action_result.message)
-                # Update the list item visually
-                try:
-                    txn_list = self.query_one("#transactions-list", ListView)
-                    if txn_list.highlighted_child:
-                        item = txn_list.highlighted_child
-                        if isinstance(item, TransactionListItem):
-                            item.update_content()
-                except Exception:
-                    # Fallback to full re-render
-                    self.run_worker(self._render_transactions, exclusive=True)  # type: ignore[arg-type]
+                # Check if transaction should be removed from filtered view
+                if should_remove_from_filter(
+                    self._filter_state,
+                    approved=txn.approved,
+                    has_category=txn.category_id is not None,
+                    sync_status=txn.sync_status,
+                ):
+                    self._remove_current_from_list(txn)
+                else:
+                    # Update the list item visually
+                    try:
+                        txn_list = self.query_one("#transactions-list", ListView)
+                        if txn_list.highlighted_child:
+                            item = txn_list.highlighted_child
+                            if isinstance(item, TransactionListItem):
+                                item.update_content()
+                    except Exception:
+                        self.run_worker(self._render_transactions, exclusive=True)  # type: ignore[arg-type]
             else:
                 self.notify(action_result.error or "Failed to approve", severity="error")
 
