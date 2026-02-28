@@ -10,6 +10,7 @@ from ynab_tui.tui.state import (
     CategoryFilter,
     FilterState,
     FilterStateMachine,
+    should_remove_from_filter,
 )
 
 
@@ -208,6 +209,78 @@ class TestFilterStateMachine:
         assert "Cat:Groceries" in label
         assert "Payee:Amazon" in label
         assert " | " in label
+
+
+class TestShouldRemoveFromFilter:
+    """Tests for should_remove_from_filter helper."""
+
+    def test_all_filter_never_removes(self) -> None:
+        """'all' mode never removes anything."""
+        state = FilterState(mode="all")
+        assert (
+            should_remove_from_filter(state, approved=True, has_category=True, sync_status="synced")
+            is False
+        )
+
+    def test_unapproved_removes_when_approved(self) -> None:
+        """'unapproved' mode removes approved transactions."""
+        state = FilterState(mode="unapproved")
+        assert (
+            should_remove_from_filter(
+                state, approved=True, has_category=False, sync_status="synced"
+            )
+            is True
+        )
+
+    def test_unapproved_keeps_unapproved(self) -> None:
+        """'unapproved' mode keeps unapproved transactions."""
+        state = FilterState(mode="unapproved")
+        assert (
+            should_remove_from_filter(
+                state, approved=False, has_category=False, sync_status="synced"
+            )
+            is False
+        )
+
+    def test_uncategorized_removes_when_categorized(self) -> None:
+        """'uncategorized' mode removes categorized transactions."""
+        state = FilterState(mode="uncategorized")
+        assert (
+            should_remove_from_filter(
+                state, approved=False, has_category=True, sync_status="synced"
+            )
+            is True
+        )
+
+    def test_uncategorized_keeps_uncategorized(self) -> None:
+        """'uncategorized' mode keeps uncategorized transactions."""
+        state = FilterState(mode="uncategorized")
+        assert (
+            should_remove_from_filter(
+                state, approved=False, has_category=False, sync_status="synced"
+            )
+            is False
+        )
+
+    def test_pending_removes_when_not_pending(self) -> None:
+        """'pending' mode removes non-pending transactions."""
+        state = FilterState(mode="pending")
+        assert (
+            should_remove_from_filter(
+                state, approved=False, has_category=False, sync_status="synced"
+            )
+            is True
+        )
+
+    def test_pending_keeps_pending(self) -> None:
+        """'pending' mode keeps pending_push transactions."""
+        state = FilterState(mode="pending")
+        assert (
+            should_remove_from_filter(
+                state, approved=False, has_category=False, sync_status="pending_push"
+            )
+            is False
+        )
 
 
 class TestFilterLabels:

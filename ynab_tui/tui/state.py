@@ -152,6 +152,29 @@ class FilterStateMachine:
         return " | ".join(parts)
 
 
+def should_remove_from_filter(
+    state: FilterState,
+    *,
+    approved: bool,
+    has_category: bool,
+    sync_status: str,
+) -> bool:
+    """Check if a transaction should be removed from the current filtered view.
+
+    After a mutation (approve, categorize, undo), check whether the transaction
+    still matches the active filter. Returns True if it should be removed.
+    """
+    if state.mode == "all":
+        return False
+    if state.mode == "unapproved":
+        return approved
+    if state.mode == "uncategorized":
+        return has_category
+    if state.mode == "pending":
+        return sync_status != "pending_push"
+    return False
+
+
 @dataclass(frozen=True)
 class TagState:
     """Immutable tag state.
