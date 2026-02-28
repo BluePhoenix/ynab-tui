@@ -131,3 +131,79 @@ def format_header_row(widths: ColumnWidths) -> str:
         f"{'Account':<{widths.account}}{sp}"
         f"{'Status':<{widths.status}}"
     )
+
+
+@dataclass(frozen=True)
+class SplitColumnWidths:
+    """Column widths for split modal item display.
+
+    Fixed columns have constant widths, dynamic columns expand based on
+    available terminal width.
+    """
+
+    # Fixed-width columns
+    status: int = 3  # [ ] or [✓]
+    quantity: int = 3  # x2 or spaces
+    price: int = 8  # $1,234.56
+
+    # Dynamic-width columns
+    item_name: int = 40
+    category: int = 20
+
+    # Spacing between columns
+    col_spacing: int = 2
+
+    @property
+    def fixed_width(self) -> int:
+        """Total width of fixed columns plus spacing."""
+        # 4 gaps between 5 columns
+        return self.status + self.quantity + self.price + (4 * self.col_spacing)
+
+
+# Minimum widths for split dynamic columns
+MIN_ITEM_NAME = 20
+MIN_SPLIT_CATEGORY = 12
+
+DEFAULT_SPLIT_WIDTHS = SplitColumnWidths()
+
+
+def calculate_split_column_widths(terminal_width: int) -> SplitColumnWidths:
+    """Calculate optimal column widths for split modal.
+
+    Args:
+        terminal_width: Available terminal width in characters.
+
+    Returns:
+        SplitColumnWidths with dimensions optimized for the terminal.
+    """
+    # Account for border/padding (2 chars each side + 1 char ListView padding each side)
+    available = terminal_width - 6
+
+    fixed = DEFAULT_SPLIT_WIDTHS.fixed_width
+    remaining = available - fixed
+
+    if remaining <= 0:
+        return SplitColumnWidths(
+            item_name=MIN_ITEM_NAME,
+            category=MIN_SPLIT_CATEGORY,
+        )
+
+    default_dynamic = DEFAULT_SPLIT_WIDTHS.item_name + DEFAULT_SPLIT_WIDTHS.category
+
+    if remaining >= default_dynamic:
+        extra = remaining - default_dynamic
+        # Item name gets 70%, category gets 30%
+        name_extra = int(extra * 0.70)
+        cat_extra = extra - name_extra
+        return SplitColumnWidths(
+            item_name=DEFAULT_SPLIT_WIDTHS.item_name + name_extra,
+            category=DEFAULT_SPLIT_WIDTHS.category + cat_extra,
+        )
+    else:
+        ratio = remaining / default_dynamic
+        item_name = max(MIN_ITEM_NAME, int(DEFAULT_SPLIT_WIDTHS.item_name * ratio))
+        category = max(MIN_SPLIT_CATEGORY, int(DEFAULT_SPLIT_WIDTHS.category * ratio))
+        return SplitColumnWidths(
+            item_name=item_name,
+            category=category,
+        )
