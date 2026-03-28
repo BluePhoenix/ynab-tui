@@ -485,6 +485,25 @@ class TestRefreshAfterPush:
             # State should be unchanged
             assert len(app._transactions.transactions) == original_count
 
+    async def test_resize_does_not_render_empty_state_during_initial_load(
+        self, tui_app_with_transactions
+    ):
+        """Resize during startup should not re-render the pre-load empty batch."""
+        app = tui_app_with_transactions
+        app._is_loading_transactions = True
+        app._has_loaded_transactions = False
+        original_batch = app._transactions
+
+        class Event:
+            class Size:
+                width = 160
+
+            size = Size()
+
+        app.on_resize(Event())
+
+        assert app._transactions is original_batch
+
 
 class TestTUISplitTransaction:
     """Test split transaction functionality."""

@@ -347,6 +347,9 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
         self._column_widths = ColumnWidths()
         # Display settings from config
         self._color_status_letters = categorizer.get_config().display.color_status_letters
+        # Guard against resize-triggered renders before the initial load completes
+        self._is_loading_transactions = False
+        self._has_loaded_transactions = False
 
     def _get_list_view(self) -> ListView | None:
         """Get the transactions ListView if it exists."""
@@ -422,6 +425,8 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
         new_widths = calculate_column_widths(event.size.width)
         if new_widths != self._column_widths:
             self._column_widths = new_widths
+            if self._is_loading_transactions or not self._has_loaded_transactions:
+                return
             # Re-render transactions with new widths
             self.run_worker(self._render_transactions, exclusive=True)  # type: ignore[arg-type]
 
@@ -451,6 +456,7 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
 
     async def _load_transactions(self) -> None:
         """Load transactions from YNAB based on current filter."""
+        self._is_loading_transactions = True
         # Clear existing content and show loading state
         container = self.query_one("#main-container")
         await container.remove_children()
@@ -477,9 +483,12 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
 
             # Update UI
             await self._render_transactions()
+            self._has_loaded_transactions = True
 
         except Exception as e:
             loading.update(f"Error: {e}")
+        finally:
+            self._is_loading_transactions = False
 
     async def _render_transactions(self) -> None:
         """Render the transactions list."""
