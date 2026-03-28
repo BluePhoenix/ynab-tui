@@ -44,7 +44,8 @@ class CategoryPickerModal(FuzzySelectModal[CategorySelection]):
     }
 
     CategoryPickerModal > #fuzzy-container {
-        width: 70;
+        width: 90%;
+        max-width: 140;
         height: 80%;
         max-height: 45;
         background: $surface;
@@ -60,11 +61,18 @@ class CategoryPickerModal(FuzzySelectModal[CategorySelection]):
     }
 
     CategoryPickerModal > #fuzzy-container > #txn-summary .summary-line {
-        height: 1;
+        height: auto;
     }
 
     CategoryPickerModal > #fuzzy-container > #txn-summary .amazon-items {
         color: $warning;
+        height: auto;
+        padding-left: 2;
+    }
+
+    CategoryPickerModal > #fuzzy-container > #txn-summary .amazon-link {
+        color: $accent;
+        text-style: underline;
         height: auto;
         padding-left: 2;
     }
@@ -273,10 +281,13 @@ class CategoryPickerModal(FuzzySelectModal[CategorySelection]):
                         classes="summary-line",
                     )
                     if self._transaction.amazon_items:
-                        items_text = ", ".join(self._transaction.amazon_items[:3])
-                        if len(self._transaction.amazon_items) > 3:
-                            items_text += f" (+{len(self._transaction.amazon_items) - 3} more)"
-                        yield Static(f"↳ {items_text}", classes="amazon-items")
+                        visible_items = self._transaction.amazon_items[:4]
+                        for item in visible_items:
+                            css_class = "amazon-link" if item.startswith(("http://", "https://")) else "amazon-items"
+                            yield Static(f"↳ {item}", classes=css_class)
+                        if len(self._transaction.amazon_items) > len(visible_items):
+                            remaining = len(self._transaction.amazon_items) - len(visible_items)
+                            yield Static(f"↳ (+{remaining} more)", classes="amazon-items")
 
             yield Input(placeholder=self._placeholder, id="fuzzy-input")
             yield ListView(id="fuzzy-list")

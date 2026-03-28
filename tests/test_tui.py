@@ -1390,6 +1390,35 @@ class TestTransactionListItemDisplay:
         assert "↳" in row
         assert "USB-C Cable" in row
 
+    def test_format_row_uses_available_width_for_long_retail_items(self):
+        """Long retail detail lines should use available width before truncating."""
+        from ynab_tui.tui.app import TransactionListItem
+        from ynab_tui.tui.layout import ColumnWidths
+
+        txn = Transaction(
+            id="txn-amazon-long-001",
+            date=datetime(2025, 1, 15),
+            amount=-21.25,
+            payee_name="AMAZON.COM",
+            payee_id="payee-amazon",
+            account_name="Credit Card",
+            account_id="acc-cc",
+            approved=False,
+            sync_status="synced",
+        )
+        txn.is_retail = True
+        txn.retail_items = [
+            "https://www.amazon.com/gp/your-account/order-details?orderID=114-3081665-6453001"
+        ]
+
+        item = TransactionListItem(
+            txn,
+            column_widths=ColumnWidths(payee=32, category=28, account=30),
+        )
+        row = item._format_row()
+
+        assert "order-details?orderID=114-3081665-6453001" in row
+
     def test_format_row_pending_status(self):
         """Test pending push transaction shows P status flag."""
         from ynab_tui.tui.app import TransactionListItem

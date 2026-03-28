@@ -169,7 +169,12 @@ class TransactionListItem(ListItem):
         enrichment = ""
         if txn.is_retail and txn.retail_items:
             indent = w.date + w.col_spacing
-            lines = [f"{'':{indent}}[dim]↳ {item[:60]}[/dim]" for item in txn.retail_items]
+            available_width = self.size.width if self.size.width > 0 else w.total_width + 4
+            max_item_width = max(60, available_width - indent - 4)
+            lines = []
+            for item in txn.retail_items:
+                display_item = item if len(item) <= max_item_width else item[: max_item_width - 3] + "..."
+                lines.append(f"{'':{indent}}[dim]↳ {display_item}[/dim]")
             enrichment = "\n" + "\n".join(lines)
 
         return (
