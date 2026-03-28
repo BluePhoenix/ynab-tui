@@ -852,7 +852,7 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
 
         # Use action handler for categorization
         action_result = self._action_handler.categorize(
-            txn, result.category_id, result.category_name
+            txn, result.category_id, result.category_name, auto_retail_memo=True
         )
 
         if action_result.success:

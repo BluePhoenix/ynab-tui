@@ -41,9 +41,9 @@ class MemoEditModal(ModalScreen[Optional[MemoEditResult]]):
     }
 
     MemoEditModal > #memo-container {
-        width: 70;
+        width: 86;
         height: auto;
-        max-height: 20;
+        max-height: 24;
         background: $surface;
         border: thick $primary;
         padding: 1;
@@ -63,7 +63,7 @@ class MemoEditModal(ModalScreen[Optional[MemoEditResult]]):
     }
 
     MemoEditModal > #memo-container > #memo-input {
-        height: 3;
+        height: 5;
         margin-bottom: 1;
     }
 

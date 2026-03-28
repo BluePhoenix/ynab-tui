@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from ...services import CategorizerService
 
 # Default widths for push preview (without account column)
-_DEFAULT_WIDTHS = ColumnWidths(payee=28, category=20, account=0)
+_DEFAULT_WIDTHS = ColumnWidths(payee=24, category=32, account=0)
 
 
 class PushChangeItem(ListItem):
@@ -64,7 +64,7 @@ class PushChangeItem(ListItem):
         has_category_change = "category_id" in new_values or "category_name" in new_values
 
         cat_width = w.category
-        half_cat = cat_width // 2 - 2  # For "old -> new" format
+        half_cat = max(12, cat_width // 2 - 2)  # For "old -> new" format
 
         # Check if this is a transfer (has transfer_account_id)
         is_transfer = bool(change.get("transfer_account_id"))
@@ -95,7 +95,11 @@ class PushChangeItem(ListItem):
             if old_cat == new_cat:
                 change_desc = f"{new_cat[:cat_width]}"
             else:
-                change_desc = f"{old_cat[:half_cat]} -> {new_cat[:half_cat]}"
+                full_desc = f"{old_cat} -> {new_cat}"
+                if len(full_desc) <= cat_width:
+                    change_desc = full_desc
+                else:
+                    change_desc = f"{old_cat[:half_cat]} -> {new_cat[:half_cat]}"
         else:
             # No category change - show transaction's actual category
             actual_cat = change.get("category_name") or "Uncategorized"
@@ -112,7 +116,17 @@ class PushChangeItem(ListItem):
             elif not new_approved and original_approved:
                 approval_change = " [red]-A[/red]"
 
-        return f"{date_str}  {payee}  {amount_str}  {change_desc}{approval_change}"
+        row = f"{date_str}  {payee}  {amount_str}  {change_desc}{approval_change}"
+
+        memo_preview = new_values.get("memo")
+        if memo_preview is not None:
+            preview_text = memo_preview or "(cleared)"
+            preview_width = max(32, w.payee + w.category + 8)
+            if len(preview_text) > preview_width:
+                preview_text = preview_text[: preview_width - 3] + "..."
+            row += f"\n{' ' * (w.date + 2)}[dim]memo:[/dim] {preview_text}"
+
+        return row
 
 
 class PushPreviewScreen(ListViewNavigationMixin, Screen):

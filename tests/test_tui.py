@@ -2047,8 +2047,8 @@ class TestPushChangeItemFormatRow:
 
         # Should NOT show "Uncategorized" since the transaction has a category
         assert "Uncategorized" not in row
-        # Should show the actual category (may be truncated to 20 chars)
-        assert "Software Subscriptio" in row  # Truncated at 20 chars
+        # Should show the actual category with more room than before
+        assert "Software Subscription" in row
         # Should show approval indicator
         assert "+A" in row
 
@@ -2070,9 +2070,9 @@ class TestPushChangeItemFormatRow:
         item = PushChangeItem(change)
         row = item._format_row()
 
-        # Categories are truncated to 8 chars each in "old -> new" format
-        assert "Uncatego" in row  # Truncated from "Uncategorized"
-        assert "Grocerie" in row  # Truncated from "Groceries"
+        # Categories should get a more useful preview width
+        assert "Uncategorized" in row
+        assert "Groceries" in row
         assert "->" in row
 
     def test_category_change_between_categories(self):
@@ -2091,9 +2091,8 @@ class TestPushChangeItemFormatRow:
         item = PushChangeItem(change)
         row = item._format_row()
 
-        # Categories are truncated to 8 chars each in "old -> new" format
-        assert "Grocerie" in row  # Truncated from "Groceries"
-        assert "Home Imp" in row  # Truncated from "Home Improvement"
+        assert "Groceries" in row
+        assert "Home Improvement" in row
         assert "->" in row
 
     def test_split_transaction_shows_split(self):
@@ -2113,6 +2112,37 @@ class TestPushChangeItemFormatRow:
         row = item._format_row()
 
         assert "Split" in row
+
+    def test_pending_memo_shows_second_line_preview(self):
+        """Memo updates should render a second-line preview in push preview."""
+        change = {
+            "date": "2025-12-23",
+            "payee_name": "Amazon",
+            "amount": -35.38,
+            "change_type": "update",
+            "new_values": {
+                "category_id": "cat-1",
+                "category_name": "Girls clothing",
+                "approved": True,
+                "memo": "Girls clothing | Haloumoning Girls Loose Athletic Shirts",
+            },
+            "original_values": {
+                "category_id": None,
+                "category_name": None,
+                "approved": False,
+                "memo": "",
+            },
+            "new_category_name": "Girls clothing",
+            "original_category_name": None,
+            "category_name": "Girls clothing",
+            "new_approved": True,
+            "original_approved": False,
+        }
+        item = PushChangeItem(change)
+        row = item._format_row()
+
+        assert "memo:" in row
+        assert "Girls clothing | Haloumoning" in row
 
 
 class TestApproveActionFlow:
@@ -2279,6 +2309,60 @@ class TestCategorizeActionComplete:
                 # If a category was selected, pending should exist
                 if pending is not None:
                     assert pending["change_type"] in ["category", "category_and_approve"]
+
+    @pytest.fixture
+    def tui_app_with_retail_transaction(self, tui_categorizer, tui_database):
+        """Create TUI app with a retail-enriched uncategorized transaction."""
+        txn = Transaction(
+            id="txn-retail-memo-001",
+            date=datetime(2025, 1, 15),
+            amount=-38.28,
+            payee_name="Amazon",
+            payee_id="payee-retail",
+            account_name="Checking",
+            account_id="acc-001",
+            approved=True,
+            category_id=None,
+            category_name=None,
+            sync_status="synced",
+        )
+        txn.is_retail = True
+        txn.retail_items = [
+            "MakeMeChic Women's Metallic Heels",
+            "https://www.amazon.com/gp/your-account/order-details?orderID=123",
+        ]
+        tui_database.upsert_ynab_transaction(txn)
+        app = YNABCategorizerApp(categorizer=tui_categorizer, is_mock=True)
+        app._test_txn = txn
+        app._test_database = tui_database
+        return app
+
+    async def test_categorize_applies_retail_memo(
+        self, tui_app_with_retail_transaction, tui_database
+    ):
+        """Categorizing a retail transaction should append item data into memo."""
+        async with tui_app_with_retail_transaction.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("j")
+            await pilot.pause()
+            await pilot.press("c")
+            await pilot.pause()
+
+            from ynab_tui.tui.modals import CategoryPickerModal
+
+            screens = tui_app_with_retail_transaction.screen_stack
+            picker = next((s for s in screens if isinstance(s, CategoryPickerModal)), None)
+
+            if picker:
+                await pilot.press("down")
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+                await tui_app_with_retail_transaction.workers.wait_for_complete()
+
+                txn = tui_app_with_retail_transaction._test_txn
+                assert "MakeMeChic Women's Metallic Heels" in (txn.memo or "")
+                assert "order-details?orderID=123" in (txn.memo or "")
 
 
 class TestUndoActionComplete:

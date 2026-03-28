@@ -59,6 +59,7 @@ class ActionHandler:
         transaction: Transaction,
         category_id: str,
         category_name: str,
+        auto_retail_memo: bool = False,
     ) -> ActionResult:
         """Apply category to transaction.
 
@@ -72,6 +73,8 @@ class ActionHandler:
         """
         try:
             self._categorizer.apply_category(transaction, category_id, category_name)
+            if auto_retail_memo:
+                self._categorizer.apply_retail_memo_if_needed(transaction)
             return ActionResult.ok(
                 message=f"Categorized as: {category_name}",
                 transaction_id=transaction.id,

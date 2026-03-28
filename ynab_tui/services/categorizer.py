@@ -630,6 +630,41 @@ class CategorizerService:
 
         return transaction
 
+    def build_retail_memo(self, transaction: Transaction) -> str:
+        """Build a memo string from retail enrichment lines."""
+        seen: set[str] = set()
+        parts: list[str] = []
+        for item in transaction.retail_items:
+            cleaned = item.strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            parts.append(cleaned)
+        return " | ".join(parts)
+
+    def apply_retail_memo_if_needed(self, transaction: Transaction) -> bool:
+        """Append retail enrichment to memo for non-split transactions.
+
+        Returns:
+            True if the memo was updated, False otherwise.
+        """
+        if not transaction.is_retail or transaction.is_split or not transaction.retail_items:
+            return False
+        if self._db.get_pending_splits(transaction.id):
+            return False
+
+        retail_memo = self.build_retail_memo(transaction)
+        if not retail_memo:
+            return False
+
+        current_memo = (transaction.memo or "").strip()
+        if retail_memo in current_memo:
+            return False
+
+        new_memo = retail_memo if not current_memo else f"{current_memo} | {retail_memo}"
+        self.apply_memo(transaction, new_memo)
+        return True
+
     def get_sync_status(self) -> dict[str, Optional[dict]]:
         """Get sync status for YNAB and retail enrichment sources.
 
