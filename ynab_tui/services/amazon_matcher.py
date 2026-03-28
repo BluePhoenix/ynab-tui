@@ -11,6 +11,15 @@ from ..db.database import AmazonOrderCache, Database
 __all__ = ["AmazonMatchResult", "AmazonOrderMatcher", "TransactionInfo"]
 
 
+def _source_priority(source: str | None) -> int:
+    priorities = {"monarch": 0, "monarch_csv": 1, "amazon": 2}
+    return priorities.get(source or "amazon", 99)
+
+
+def _order_key(order: AmazonOrderCache) -> tuple[str, str]:
+    return (getattr(order, "source", "amazon"), order.order_id)
+
+
 @dataclass
 class TransactionInfo:
     """Normalized transaction data for matching.
@@ -85,7 +94,7 @@ def find_best_order_match(
             continue
         if abs(order.total - txn_info.amount) <= amount_tolerance:
             date_diff = abs((txn_info.date - order.order_date).days)
-            source_priority = 0 if getattr(order, "source", "amazon") == "monarch" else 1
+            source_priority = _source_priority(getattr(order, "source", "amazon"))
             score = (date_diff, source_priority, abs(order.total - txn_info.amount))
             if date_diff <= window_days and score < best_score:
                 best_match, best_score = order, score
@@ -194,15 +203,16 @@ def match_transactions_two_stage(
                 if date_diff <= stage1_window:
                     stage1_candidates.append((txn_info, order, amount_diff, date_diff))
     stage1_candidates.sort(
-        key=lambda x: (x[2], x[3], 0 if getattr(x[1], "source", "amazon") == "monarch" else 1)
+        key=lambda x: (x[2], x[3], _source_priority(getattr(x[1], "source", "amazon")))
     )
 
     for txn_info, order, _, _ in stage1_candidates:
         if txn_info.transaction_id in matched_txn_ids:
             continue
-        if order.order_id not in matched_order_ids:
+        order_key = _order_key(order)
+        if order_key not in matched_order_ids:
             stage1_matches.append((txn_info, order))
-            matched_order_ids.add(order.order_id)
+            matched_order_ids.add(order_key)
             matched_txn_ids.add(txn_info.transaction_id)
         else:
             duplicate_matches.append((txn_info, order))
@@ -222,15 +232,16 @@ def match_transactions_two_stage(
                 if date_diff <= stage2_window:
                     stage2_candidates.append((txn_info, order, amount_diff, date_diff))
     stage2_candidates.sort(
-        key=lambda x: (x[2], x[3], 0 if getattr(x[1], "source", "amazon") == "monarch" else 1)
+        key=lambda x: (x[2], x[3], _source_priority(getattr(x[1], "source", "amazon")))
     )
 
     for txn_info, order, _, _ in stage2_candidates:
         if txn_info.transaction_id in matched_txn_ids:
             continue
-        if order.order_id not in matched_order_ids:
+        order_key = _order_key(order)
+        if order_key not in matched_order_ids:
             stage2_matches.append((txn_info, order))
-            matched_order_ids.add(order.order_id)
+            matched_order_ids.add(order_key)
             matched_txn_ids.add(txn_info.transaction_id)
         else:
             duplicate_matches.append((txn_info, order))
@@ -245,7 +256,7 @@ def match_transactions_two_stage(
     )
 
     # Filter combo-matched items
-    combo_order_ids = {order.order_id for order, _ in combo_matches}
+    combo_order_ids = {_order_key(order) for order, _ in combo_matches}
     combo_txn_keys = {(t.date_str, t.amount) for _, txns in combo_matches for t in txns}
 
     return AmazonMatchResult(
@@ -256,7 +267,7 @@ def match_transactions_two_stage(
         unmatched_transactions=[
             t for t in unmatched_txns if (t.date_str, t.amount) not in combo_txn_keys
         ],
-        unmatched_orders=[o for o in unmatched_orders if o.order_id not in combo_order_ids],
+        unmatched_orders=[o for o in unmatched_orders if _order_key(o) not in combo_order_ids],
     )
 
 

@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from tqdm import tqdm
 
-from ynab_tui.config import AmazonConfig, CategorizationConfig
+from ynab_tui.config import AmazonConfig, CategorizationConfig, MonarchConfig, PayeesConfig
+from ynab_tui.services.monarch_csv_import import MonarchCsvImportError, parse_monarch_csv
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,7 @@ class PullResult:
     # Category history backfill tracking
     history_backfill_needed: bool = False
     history_backfill_count: int = 0  # Number of entries to backfill (or backfilled)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def success(self) -> bool:
@@ -744,6 +746,78 @@ class SyncService:
 
         return result
 
+    def import_monarch_csv(
+        self,
+        csv_path: str,
+        payees_config: PayeesConfig,
+        monarch_config: MonarchConfig | None = None,
+        replace_source: bool = False,
+        dry_run: bool = False,
+    ) -> PullResult:
+        """Import Monarch CSV retail enrichment into the local cache."""
+        result = PullResult(source="monarch_csv")
+        try:
+            orders, metadata = parse_monarch_csv(csv_path, payees_config, monarch_config)
+            result.metadata = metadata
+            result.fetched = len(orders)
+
+            if orders:
+                result.oldest_date = min(o.order_date for o in orders)
+                result.newest_date = max(o.order_date for o in orders)
+
+            if dry_run:
+                for order in orders:
+                    existing = self._db.get_cached_retail_order(order.source, order.order_id)
+                    detail = AmazonOrderDetail(
+                        order_id=order.order_id,
+                        order_date=order.order_date,
+                        total=order.total,
+                    )
+                    if existing:
+                        new_date = order.order_date.strftime("%Y-%m-%d")
+                        if existing["order_date"] != new_date or existing["total"] != order.total:
+                            result.updated += 1
+                            result.details_to_update.append(detail)
+                    else:
+                        result.inserted += 1
+                        result.details_to_insert.append(detail)
+                result.total = self._db.get_order_count(source="monarch_csv")
+                return result
+
+            if replace_source:
+                self._db.delete_retail_orders_by_source("monarch_csv")
+
+            for order in tqdm(orders, desc="Importing Monarch CSV", unit="order", leave=False):
+                was_inserted, was_changed = self._db.cache_retail_order(
+                    source=order.source,
+                    retailer=order.retailer,
+                    external_id=order.order_id,
+                    order_date=order.order_date,
+                    total=order.total,
+                    source_metadata=getattr(order, "source_metadata", None),
+                )
+                if was_inserted:
+                    result.inserted += 1
+                elif was_changed:
+                    result.updated += 1
+
+                items = [
+                    {"name": item.name, "price": item.price, "quantity": item.quantity}
+                    for item in order.items
+                ]
+                self._db.upsert_retail_order_items(order.source, order.order_id, items)
+
+            result.total = self._db.get_order_count(source="monarch_csv")
+            self._db.update_sync_state("monarch_csv", datetime.now(), result.total)
+            if replace_source:
+                result.metadata["replaced_source"] = True
+        except MonarchCsvImportError as exc:
+            result.errors.append(str(exc))
+        except Exception as e:
+            result.errors.append(str(e))
+
+        return result
+
     def push_ynab(
         self,
         dry_run: bool = False,
@@ -1044,11 +1118,15 @@ class SyncService:
         ynab_state = self._db.get_sync_state("ynab")
         amazon_state = self._db.get_sync_state("amazon")
         monarch_state = self._db.get_sync_state("monarch")
+        monarch_csv_state = self._db.get_sync_state("monarch_csv")
         categories_state = self._db.get_sync_state("categories")
 
         txn_earliest, txn_latest = self._db.get_transaction_date_range()
         order_earliest, order_latest = self._db.get_order_date_range(source="amazon")
         monarch_earliest, monarch_latest = self._db.get_order_date_range(source="monarch")
+        monarch_csv_earliest, monarch_csv_latest = self._db.get_order_date_range(
+            source="monarch_csv"
+        )
 
         return {
             "categories": {
@@ -1079,5 +1157,15 @@ class SyncService:
                 "latest_date": monarch_latest,
                 "last_sync_date": monarch_state["last_sync_date"] if monarch_state else None,
                 "last_sync_at": monarch_state["last_sync_at"] if monarch_state else None,
+            },
+            "monarch_csv": {
+                "order_count": self._db.get_order_count(source="monarch_csv"),
+                "item_count": self._db.get_order_item_count(source="monarch_csv"),
+                "earliest_date": monarch_csv_earliest,
+                "latest_date": monarch_csv_latest,
+                "last_sync_date": (
+                    monarch_csv_state["last_sync_date"] if monarch_csv_state else None
+                ),
+                "last_sync_at": monarch_csv_state["last_sync_at"] if monarch_csv_state else None,
             },
         }

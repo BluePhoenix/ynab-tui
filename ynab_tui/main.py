@@ -648,6 +648,46 @@ def monarch_login(ctx, session_file):
         click.echo(click.style(f"✗ Error: {e}", fg="red"))
 
 
+@main.command("monarch-import")
+@click.argument("csv_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--replace-source", is_flag=True, help="Replace existing monarch_csv cache rows")
+@click.option("--dry-run", is_flag=True, help="Parse and compare CSV without writing to the DB")
+@click.pass_context
+def monarch_import(ctx, csv_path, replace_source, dry_run):
+    """Import Monarch transaction CSV as a retail enrichment source."""
+    sync_service = get_sync_service(ctx)
+    cfg = ctx.obj["config"]
+
+    click.echo("Importing Monarch CSV...")
+    click.echo(f"  File: {csv_path}")
+    if replace_source:
+        message = "  Replacing existing monarch_csv rows" if not dry_run else "  Would replace existing monarch_csv rows"
+        click.echo(message)
+
+    result = sync_service.import_monarch_csv(
+        csv_path=csv_path,
+        payees_config=cfg.payees,
+        monarch_config=cfg.monarch,
+        replace_source=replace_source,
+        dry_run=dry_run,
+    )
+
+    if not result.success:
+        click.echo(click.style(f"✗ Import failed: {result.errors[0]}", fg="red"))
+        return
+
+    retailers = result.metadata.get("retailers_detected", {})
+    retailer_summary = ", ".join(f"{name}={count}" for name, count in sorted(retailers.items()))
+    click.echo(click.style(f"  ✓ Parsed {result.fetched} retail rows", fg="green"))
+    click.echo(f"    Skipped rows: {result.metadata.get('rows_skipped', 0)}")
+    click.echo(f"    Inserted: {result.inserted}, Updated: {result.updated}")
+    click.echo(f"    Total in database: {result.total}")
+    if retailer_summary:
+        click.echo(f"    Retailers: {retailer_summary}")
+    if dry_run:
+        click.echo("    Dry run only: no database changes written")
+
+
 @main.command("db-amazon-orders")
 @click.option(
     "--days", "-d", type=int, default=30, help="Query orders from last N days (default: 30)"
@@ -1302,14 +1342,26 @@ def db_status(ctx):
 
     monarch = status["monarch"]
     click.echo("Monarch Retail:")
-    click.echo(f"  Orders:         {monarch['order_count']:,}")
+    click.echo(f"  API orders:     {monarch['order_count']:,}")
     if monarch["earliest_date"] and monarch["latest_date"]:
         click.echo(f"  Date range:     {monarch['earliest_date']} to {monarch['latest_date']}")
-    click.echo(f"  Items:          {monarch['item_count']:,}")
+    click.echo(f"  API items:      {monarch['item_count']:,}")
     if monarch["last_sync_at"]:
-        click.echo(f"  Last sync:      {monarch['last_sync_at'].strftime('%Y-%m-%d %H:%M:%S')}")
+        click.echo(f"  API last sync:  {monarch['last_sync_at'].strftime('%Y-%m-%d %H:%M:%S')}")
     else:
-        click.echo("  Last sync:      Never")
+        click.echo("  API last sync:  Never")
+
+    monarch_csv = status["monarch_csv"]
+    click.echo(f"  CSV orders:     {monarch_csv['order_count']:,}")
+    if monarch_csv["earliest_date"] and monarch_csv["latest_date"]:
+        click.echo(f"  CSV range:      {monarch_csv['earliest_date']} to {monarch_csv['latest_date']}")
+    click.echo(f"  CSV items:      {monarch_csv['item_count']:,}")
+    if monarch_csv["last_sync_at"]:
+        click.echo(
+            f"  CSV last sync:  {monarch_csv['last_sync_at'].strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+    else:
+        click.echo("  CSV last sync:  Never")
 
     click.echo()
 

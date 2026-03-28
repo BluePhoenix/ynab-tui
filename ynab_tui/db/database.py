@@ -1126,6 +1126,12 @@ class Database:
                 return (row["earliest"][:10], row["latest"][:10])
             return (None, None)
 
+    def delete_retail_orders_by_source(self, source: str) -> None:
+        """Delete cached retail orders and items for a given source."""
+        with self._connection() as conn:
+            conn.execute("DELETE FROM retail_order_items WHERE source = ?", (source,))
+            conn.execute("DELETE FROM retail_orders_cache WHERE source = ?", (source,))
+
     # =========================================================================
     # Category Methods
     # =========================================================================

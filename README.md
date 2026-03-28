@@ -16,6 +16,7 @@ A terminal user interface for categorizing YNAB (You Need A Budget) transactions
 - **TUI for transaction review** - Review and categorize uncategorized transactions
 - **Amazon order matching** - Scrapes your Amazon order history to identify purchased items
 - **Monarch retail enrichment** - Uses Monarch transaction detail as an optional enrichment source for Amazon/Target-style purchases
+- **Monarch CSV import** - Imports Monarch transaction exports as a fallback enrichment source when live API access is unavailable
 - **Split transaction support** - Split Amazon orders into individual items with separate categories
 - **Historical pattern learning** - Learns from your categorization decisions for recurring payees
 - **Git-style workflow** - Pull transactions to local DB, categorize offline, push changes back

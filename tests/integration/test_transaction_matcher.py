@@ -305,6 +305,21 @@ class TestWithRealMatcher:
     ) -> None:
         """Monarch should win when it and Amazon both match the same transaction."""
         db_with_orders.cache_retail_order(
+            source="monarch_csv",
+            retailer="amazon",
+            external_id="csv-1",
+            order_date=datetime(2025, 11, 24),
+            total=44.99,
+            source_metadata={"provider": "monarch_csv"},
+        )
+        db_with_orders.upsert_retail_order_items(
+            "monarch_csv",
+            "csv-1",
+            [
+                {"name": "CSV Widget", "price": 44.99, "quantity": 1},
+            ],
+        )
+        db_with_orders.cache_retail_order(
             source="monarch",
             retailer="amazon",
             external_id="m1",
@@ -334,6 +349,41 @@ class TestWithRealMatcher:
         assert result is not None
         assert result.order.source == "monarch"
         assert result.order.order_id == "m1"
+
+    def test_monarch_csv_orders_are_preferred_over_amazon(
+        self, db_with_orders: Database, default_configs: tuple
+    ) -> None:
+        """monarch_csv should beat Amazon when both match the same transaction."""
+        db_with_orders.cache_retail_order(
+            source="monarch_csv",
+            retailer="amazon",
+            external_id="csv-2",
+            order_date=datetime(2025, 11, 24),
+            total=44.99,
+            source_metadata={"provider": "monarch_csv"},
+        )
+        db_with_orders.upsert_retail_order_items(
+            "monarch_csv",
+            "csv-2",
+            [
+                {"name": "CSV Preferred Widget", "price": 44.99, "quantity": 1},
+            ],
+        )
+
+        cat_config, payees_config = default_configs
+        matcher = TransactionMatcher(db_with_orders, cat_config, payees_config)
+        txn = make_transaction(
+            id="txn-csv-pref",
+            payee_name="Amazon.com",
+            amount=-44.99,
+            date=datetime(2025, 11, 24),
+        )
+
+        result = matcher.find_order_match(txn)
+
+        assert result is not None
+        assert result.order.source == "monarch_csv"
+        assert result.order.order_id == "csv-2"
 
     def test_find_order_match_no_match(
         self, db_with_orders: Database, default_configs: tuple

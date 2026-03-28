@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from types import MethodType
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -55,7 +56,39 @@ class MonarchClient:
                 "Monarch support requires the 'monarchmoney' package to be installed"
             ) from exc
 
-        return MonarchMoney()
+        client = MonarchMoney()
+        self._apply_compatibility_shims(client)
+        return client
+
+    def _apply_compatibility_shims(self, client: Any) -> None:
+        """Patch known monarchmoney/runtime mismatches for the local environment."""
+        gql_call = getattr(client, "gql_call", None)
+        get_graphql_client = getattr(client, "_get_graphql_client", None)
+        if gql_call is None or get_graphql_client is None:
+            return
+
+        try:
+            source = inspect.getsource(gql_call)
+        except (OSError, TypeError):
+            source = ""
+
+        if "document=graphql_query" not in source:
+            return
+
+        async def compat_gql_call(
+            self,
+            operation: str,
+            graphql_query: Any,
+            variables: dict[str, Any] = {},
+        ) -> dict[str, Any]:
+            graphql_client = self._get_graphql_client()
+            return await graphql_client.execute_async(
+                request=graphql_query,
+                variable_values=variables,
+                operation_name=operation,
+            )
+
+        client.gql_call = MethodType(compat_gql_call, client)
 
     def _load_session(self, client: Any) -> None:
         """Load a session or token into the Monarch client."""
@@ -64,11 +97,25 @@ class MonarchClient:
                 "Monarch session not configured. Set MONARCH_SESSION_FILE or MONARCH_SESSION_TOKEN."
             )
 
-        load_session = getattr(client, "load_session", None)
-        if load_session is None:
-            raise MonarchClientError("Configured Monarch client does not support session loading")
-
         try:
+            if self._config.session_token:
+                token = self._config.session_token
+                set_token = getattr(client, "set_token", None)
+                if callable(set_token):
+                    set_token(token)
+                else:
+                    # Fall back to assigning the token/header for compatible clients.
+                    if hasattr(client, "_token"):
+                        client._token = token
+                    headers = getattr(client, "_headers", None)
+                    if isinstance(headers, dict):
+                        headers["Authorization"] = f"Token {token}"
+                return
+
+            load_session = getattr(client, "load_session", None)
+            if load_session is None:
+                raise MonarchClientError("Configured Monarch client does not support session loading")
+
             if self._config.session_file:
                 session_path = str(Path(self._config.session_file).expanduser())
                 try:
@@ -90,6 +137,7 @@ class MonarchClient:
     def _ensure_client(self) -> Any:
         """Return an authenticated Monarch client."""
         client = self._build_client()
+        self._apply_compatibility_shims(client)
         if self._api_client is None:
             self._load_session(client)
             self._api_client = client
@@ -103,6 +151,9 @@ class MonarchClient:
             if get_accounts is None:
                 raise MonarchClientError("Configured Monarch client does not support get_accounts()")
             accounts = self._run(get_accounts())
+            if isinstance(accounts, dict):
+                account_rows = accounts.get("accounts", [])
+                return {"success": True, "account_count": len(account_rows or [])}
             return {"success": True, "account_count": len(accounts or [])}
         except Exception as exc:
             if isinstance(exc, MonarchClientError):

@@ -1161,6 +1161,40 @@ class TestMonarchCommands:
         assert "ynab-tui monarch-login" in result.output
         assert str(isolated_mock_env / "missing.session") in result.output
 
+    def test_monarch_import_dry_run_reports_counts(self, cli_runner, isolated_mock_env):
+        """monarch-import should parse eligible CSV rows and summarize the dry run."""
+        csv_path = isolated_mock_env / "monarch.csv"
+        csv_path.write_text(
+            "Date,Merchant,Amount,Notes,Transaction Type,ID\n"
+            "2026-03-01,Amazon Marketplace,-44.99,Items: Widget A,debit,txn-1\n"
+            "2026-03-01,Coffee Shop,-5.00,Latte,debit,txn-2\n"
+        )
+
+        result = cli_runner.invoke(main, ["--mock", "monarch-import", str(csv_path), "--dry-run"])
+
+        assert result.exit_code == 0
+        assert "Parsed 1 retail rows" in result.output
+        assert "Retailers: amazon=1" in result.output
+        assert "Dry run only" in result.output
+
+    def test_monarch_import_replace_source_updates_db_status(self, cli_runner, isolated_mock_env):
+        """monarch-import should populate the monarch_csv cache and report it in db-status."""
+        csv_path = isolated_mock_env / "monarch.csv"
+        csv_path.write_text(
+            "Date,Merchant,Amount,Notes,Transaction Type,ID\n"
+            "2026-03-01,Target Store,-18.50,Office supplies,debit,txn-3\n"
+        )
+
+        import_result = cli_runner.invoke(
+            main, ["--mock", "monarch-import", str(csv_path), "--replace-source"]
+        )
+        status_result = cli_runner.invoke(main, ["--mock", "db-status"])
+
+        assert import_result.exit_code == 0
+        assert "Parsed 1 retail rows" in import_result.output
+        assert status_result.exit_code == 0
+        assert "CSV orders:     1" in status_result.output
+
 
 class TestUncategorizedAfterPull:
     """Tests for uncategorized command after data pull."""
