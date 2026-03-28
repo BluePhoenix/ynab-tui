@@ -46,6 +46,8 @@ htmlcov/
 config.toml
 token.txt
 *.token
+secrets.env
+secrets.env.*
 
 # Database
 *.db

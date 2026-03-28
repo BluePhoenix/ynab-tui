@@ -50,6 +50,7 @@ class TestDBStatusCommand:
         assert "Database Status" in result.output
         assert "YNAB Transactions:" in result.output
         assert "Amazon Orders:" in result.output
+        assert "Monarch Retail:" in result.output
         assert "Category Mappings:" in result.output
 
 
@@ -1127,6 +1128,38 @@ class TestMockModeOptions:
 
         result = cli_runner.invoke(main, ["--mock", "db-status"])
         assert result.exit_code == 0
+
+
+class TestMonarchCommands:
+    """Tests for Monarch CLI commands."""
+
+    def test_monarch_test_missing_session_shows_login_hint(
+        self, cli_runner, isolated_mock_env, monkeypatch
+    ):
+        """Test monarch-test points to monarch-login when the session file is missing."""
+        monkeypatch.setenv("MONARCH_ENABLED", "true")
+        monkeypatch.setenv("MONARCH_SESSION_FILE", str(isolated_mock_env / "missing.session"))
+
+        class FakeMonarchClient:
+            def __init__(self, _cfg):
+                pass
+
+            def test_connection(self):
+                return {
+                    "success": False,
+                    "error": (
+                        f"Failed to load Monarch session: [Errno 2] No such file or directory: "
+                        f"'{isolated_mock_env / 'missing.session'}'"
+                    ),
+                }
+
+        monkeypatch.setattr("ynab_tui.main.MonarchClient", FakeMonarchClient)
+
+        result = cli_runner.invoke(main, ["monarch-test"])
+        assert result.exit_code == 0
+        assert "Session file not found." in result.output
+        assert "ynab-tui monarch-login" in result.output
+        assert str(isolated_mock_env / "missing.session") in result.output
 
 
 class TestUncategorizedAfterPull:

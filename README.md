@@ -15,6 +15,7 @@ A terminal user interface for categorizing YNAB (You Need A Budget) transactions
 
 - **TUI for transaction review** - Review and categorize uncategorized transactions
 - **Amazon order matching** - Scrapes your Amazon order history to identify purchased items
+- **Monarch retail enrichment** - Uses Monarch transaction detail as an optional enrichment source for Amazon/Target-style purchases
 - **Split transaction support** - Split Amazon orders into individual items with separate categories
 - **Historical pattern learning** - Learns from your categorization decisions for recurring payees
 - **Git-style workflow** - Pull transactions to local DB, categorize offline, push changes back
@@ -62,13 +63,73 @@ This creates `~/.config/ynab-tui/config.toml`. Edit it to add your credentials:
 
 - **YNAB API token** (required) - Get from https://app.ynab.com/settings/developer
 - **Amazon credentials** (optional) - For order history scraping via [amazon-orders](https://github.com/alexdlaird/amazon-orders)
+- **Monarch session** (optional) - For retail enrichment via the unofficial `monarchmoney` client
 
 You can also use environment variables instead of the config file:
 ```bash
 export YNAB_API_TOKEN="your-token"
 export AMAZON_USERNAME="your-email"
 export AMAZON_PASSWORD="your-password"
+export MONARCH_ENABLED="true"
+export MONARCH_SESSION_FILE="/path/to/monarch.session"
 ```
+
+### Local Dev Setup
+
+This repo targets **Python 3.11** and uses `uv` for environment management.
+
+```bash
+brew install python@3.11 uv
+env UV_CACHE_DIR=$PWD/.uv-cache uv sync --all-extras
+env YNAB_TUI_DATA_DIR=$PWD/.ynab-tui UV_CACHE_DIR=$PWD/.uv-cache uv run ynab-tui init
+env YNAB_TUI_DATA_DIR=$PWD/.ynab-tui UV_CACHE_DIR=$PWD/.uv-cache uv run ynab-tui --help
+```
+
+Using `YNAB_TUI_DATA_DIR=$PWD/.ynab-tui` keeps the local config and SQLite DB inside the repo instead of writing to `~/.config/ynab-tui`.
+
+### Encrypted Secrets With SOPS
+
+If you don't want tokens and passwords in plaintext `config.toml`, you can keep them in an encrypted dotenv file and launch the app through the helper script in [scripts/run-with-sops.sh](/Users/felixbarros/Development/External/ynab-tui/scripts/run-with-sops.sh).
+
+1. Install tools:
+
+```bash
+brew install sops age
+```
+
+2. Create an age key:
+
+```bash
+mkdir -p ~/.config/sops/age
+age-keygen -o ~/.config/sops/age/keys.txt
+age-keygen -y ~/.config/sops/age/keys.txt
+```
+
+3. Create `secrets.env` with values like:
+
+```bash
+YNAB_API_TOKEN=your-token
+AMAZON_USERNAME=you@example.com
+AMAZON_PASSWORD=your-password
+AMAZON_OTP_SECRET=base32totpsecret
+```
+
+4. Encrypt it:
+
+```bash
+SOPS_AGE_RECIPIENTS="age1replace-with-your-public-key" sops --encrypt --input-type dotenv --output-type dotenv secrets.env > secrets.env.enc
+mv secrets.env.enc secrets.env
+```
+
+5. Run the app with decrypted env vars loaded in-memory:
+
+```bash
+./scripts/run-with-sops.sh --help
+./scripts/run-with-sops.sh pull --full
+./scripts/run-with-sops.sh
+```
+
+The script keeps your runtime data in `.ynab-tui/` and never writes decrypted secrets back to disk unless you choose to.
 
 ## Usage
 
@@ -135,6 +196,7 @@ ynab-tui mappings-create   # Build mappings from approved transactions
 # Test connections
 ynab-tui ynab-test
 ynab-tui amazon-test
+ynab-tui monarch-test
 ```
 
 ### Makefile

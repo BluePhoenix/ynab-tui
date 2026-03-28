@@ -3,6 +3,7 @@
 Provides both TUI and CLI interfaces for transaction categorization.
 """
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -21,7 +22,7 @@ from .cli import (
     get_sync_service,
     require_data,
 )
-from .clients import AmazonClient
+from .clients import AmazonClient, MonarchClient
 from .config import load_config
 from .services import CategorizerService
 from .utils import is_amazon_payee
@@ -41,6 +42,12 @@ budget_id = "last-used"
 username = ""  # or set AMAZON_USERNAME environment variable
 password = ""  # or set AMAZON_PASSWORD environment variable
 otp_secret = ""  # TOTP secret for 2FA (optional)
+
+[monarch]
+# Monarch retail enrichment (optional)
+enabled = false  # or set MONARCH_ENABLED=true
+session_file = ""  # or set MONARCH_SESSION_FILE
+session_token = ""  # or set MONARCH_SESSION_TOKEN
 
 [logging]
 # Log level: DEBUG, INFO, WARNING, ERROR (default: WARNING)
@@ -555,6 +562,92 @@ def amazon_test(ctx):
         click.echo(click.style(f"✗ Error: {e}", fg="red"))
 
 
+@main.command("monarch-test")
+@click.pass_context
+def monarch_test(ctx):
+    """Test Monarch retail enrichment connection."""
+    if ctx.obj.get("mock"):
+        click.echo(
+            click.style("Note: --mock flag ignored (this command tests live API)", fg="yellow")
+        )
+
+    cfg = ctx.obj["config"]
+
+    click.echo("Testing Monarch connection...")
+
+    if not cfg.monarch.enabled:
+        click.echo(click.style("✗ Monarch is not enabled!", fg="red"))
+        click.echo("  Set MONARCH_ENABLED=true and configure MONARCH_SESSION_FILE or")
+        click.echo("  MONARCH_SESSION_TOKEN in your environment or config.toml")
+        return
+
+    if not cfg.monarch.session_file and not cfg.monarch.session_token:
+        click.echo(click.style("✗ Monarch session not configured!", fg="red"))
+        click.echo("  Set MONARCH_SESSION_FILE or MONARCH_SESSION_TOKEN")
+        return
+
+    click.echo(f"  Session file: {cfg.monarch.session_file or '(not set)'}")
+    click.echo(f"  Session token: {'configured' if cfg.monarch.session_token else 'not set'}")
+
+    try:
+        client = MonarchClient(cfg.monarch)
+        click.echo("  Attempting session validation...")
+        result = client.test_connection()
+        if result["success"]:
+            click.echo(click.style("✓ Connection successful!", fg="green"))
+            click.echo(f"  Accounts accessible: {result['account_count']}")
+        else:
+            click.echo(click.style(f"✗ Connection failed: {result['error']}", fg="red"))
+            if cfg.monarch.session_file and "No such file or directory" in result["error"]:
+                click.echo(
+                    click.style(
+                        "  Session file not found.",
+                        fg="yellow",
+                    )
+                )
+                click.echo("  Run 'ynab-tui monarch-login' to create a saved session.")
+                click.echo(f"  Expected location: {cfg.monarch.session_file}")
+    except Exception as e:
+        click.echo(click.style(f"✗ Error: {e}", fg="red"))
+
+
+@main.command("monarch-login")
+@click.option(
+    "--session-file",
+    type=click.Path(dir_okay=False),
+    help="Path to save the Monarch session file (defaults to config value)",
+)
+@click.pass_context
+def monarch_login(ctx, session_file):
+    """Create or refresh a saved Monarch session via interactive login."""
+    if ctx.obj.get("mock"):
+        click.echo(
+            click.style("Note: --mock flag ignored (this command tests live API)", fg="yellow")
+        )
+
+    cfg = ctx.obj["config"]
+    target_session_file = session_file or cfg.monarch.session_file
+    if not target_session_file:
+        target_session_file = str(cfg.data_dir / "monarch.session")
+
+    click.echo("Starting Monarch interactive login...")
+    click.echo(f"  Session file: {target_session_file}")
+
+    try:
+        Path(target_session_file).expanduser().parent.mkdir(parents=True, exist_ok=True)
+
+        from monarchmoney import MonarchMoney
+
+        mm = MonarchMoney(session_file=str(Path(target_session_file).expanduser()))
+        asyncio.run(mm.interactive_login(use_saved_session=False, save_session=True))
+
+        click.echo(click.style("✓ Monarch session saved!", fg="green"))
+        click.echo(f"  Saved to: {target_session_file}")
+        click.echo("  Next step: run 'ynab-tui monarch-test'")
+    except Exception as e:
+        click.echo(click.style(f"✗ Error: {e}", fg="red"))
+
+
 @main.command("db-amazon-orders")
 @click.option(
     "--days", "-d", type=int, default=30, help="Query orders from last N days (default: 30)"
@@ -772,7 +865,7 @@ def amazon_match(ctx, verbose):
 )
 @click.pass_context
 def pull(ctx, full, ynab, amazon, amazon_year, since_days, dry_run, fix, verbose):
-    """Pull data from YNAB and Amazon to local database.
+    """Pull data from YNAB and optional retail sources to local database.
 
     Downloads categories, transactions and orders to local SQLite for offline
     analysis and categorization. Uses incremental sync by default (7-day overlap).
@@ -904,10 +997,15 @@ def pull(ctx, full, ynab, amazon, amazon_year, since_days, dry_run, fix, verbose
         else:
             click.echo(click.style(f"  ✗ Error: {result.errors}", fg="red"))
 
-    # Pull Amazon
+    # Pull Amazon and Monarch
     if not ynab:
         mock = ctx.obj.get("mock", False)
         has_amazon_creds = mock or (config.amazon.username and config.amazon.password)
+        has_monarch_config = (
+            not mock
+            and config.monarch.enabled
+            and (config.monarch.session_file or config.monarch.session_token)
+        )
 
         if not has_amazon_creds:
             if amazon:
@@ -958,6 +1056,46 @@ def pull(ctx, full, ynab, amazon, amazon_year, since_days, dry_run, fix, verbose
                     display_dry_run_amazon(result)
             else:
                 click.echo(click.style(f"  ✗ Error: {result.errors}", fg="red"))
+
+        if has_monarch_config and not amazon:
+            click.echo("\nPulling Monarch retail enrichment...")
+            monarch_state = sync_service._db.get_sync_state("monarch")
+            if since_days:
+                click.echo(f"  Fetching last {since_days} days")
+            elif full:
+                click.echo("  Full sync requested")
+            elif monarch_state and monarch_state.get("last_sync_at"):
+                from datetime import datetime as dt
+                from datetime import timedelta
+
+                click.echo(
+                    f"  Last sync: {monarch_state['last_sync_at'].strftime('%Y-%m-%d %H:%M')}"
+                )
+                days_since = (dt.now() - monarch_state["last_sync_date"]).days + sync_overlap_days
+                since_date = dt.now() - timedelta(days=days_since)
+                click.echo(f"  Fetching since: {since_date.strftime('%Y-%m-%d')}")
+            else:
+                click.echo("  First sync - fetching recent retail activity")
+
+            result = sync_service.pull_monarch(
+                full=full,
+                since_days=since_days,
+                dry_run=dry_run,
+            )
+            results["monarch"] = result
+
+            if result.success:
+                click.echo(click.style(f"  ✓ Fetched {result.fetched} retail orders", fg="green"))
+                if result.oldest_date and result.newest_date:
+                    click.echo(
+                        f"    Date range: {result.oldest_date.strftime('%Y-%m-%d')} to {result.newest_date.strftime('%Y-%m-%d')}"
+                    )
+                click.echo(f"    Inserted: {result.inserted}, Updated: {result.updated}")
+                click.echo(f"    Total in database: {result.total}")
+            else:
+                click.echo(click.style(f"  ✗ Error: {result.errors}", fg="red"))
+        elif config.monarch.enabled and not amazon:
+            click.echo("\nSkipping Monarch (no session configured)")
 
     click.echo("\nPull complete!")
 
@@ -1157,6 +1295,19 @@ def db_status(ctx):
     click.echo(f"  Items:          {amazon['item_count']:,}")
     if amazon["last_sync_at"]:
         click.echo(f"  Last sync:      {amazon['last_sync_at'].strftime('%Y-%m-%d %H:%M:%S')}")
+    else:
+        click.echo("  Last sync:      Never")
+
+    click.echo()
+
+    monarch = status["monarch"]
+    click.echo("Monarch Retail:")
+    click.echo(f"  Orders:         {monarch['order_count']:,}")
+    if monarch["earliest_date"] and monarch["latest_date"]:
+        click.echo(f"  Date range:     {monarch['earliest_date']} to {monarch['latest_date']}")
+    click.echo(f"  Items:          {monarch['item_count']:,}")
+    if monarch["last_sync_at"]:
+        click.echo(f"  Last sync:      {monarch['last_sync_at'].strftime('%Y-%m-%d %H:%M:%S')}")
     else:
         click.echo("  Last sync:      Never")
 

@@ -28,6 +28,17 @@ class AmazonOrderCache:
     total: float
     items: list[str]
     fetched_at: datetime
+    source: str = "amazon"
+    retailer: str = "amazon"
+    source_metadata: Optional[dict] = None
+
+    @property
+    def external_id(self) -> str:
+        """Generic compatibility alias."""
+        return self.order_id
+
+
+RetailOrderCache = AmazonOrderCache
 
 
 @dataclass

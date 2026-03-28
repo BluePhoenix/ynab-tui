@@ -7,6 +7,7 @@ from ynab_tui.config import (
     AmazonConfig,
     CategorizationConfig,
     Config,
+    MonarchConfig,
     PayeesConfig,
     YNABConfig,
     load_config,
@@ -67,6 +68,19 @@ class TestCategorizationConfig:
         assert config.date_match_window_days == 5
 
 
+class TestMonarchConfig:
+    """Tests for MonarchConfig dataclass."""
+
+    def test_default_values(self):
+        """Test default Monarch configuration values."""
+        config = MonarchConfig()
+        assert config.enabled is False
+        assert config.session_file == ""
+        assert config.session_token == ""
+        assert "amazon" in config.retailers
+        assert "target" in config.retailers
+
+
 class TestPayeesConfig:
     """Tests for PayeesConfig dataclass."""
 
@@ -75,6 +89,7 @@ class TestPayeesConfig:
         config = PayeesConfig()
         assert "AMAZON" in config.amazon_patterns
         assert "AMZN" in config.amazon_patterns
+        assert "TARGET" in config.target_patterns
 
     def test_custom_patterns(self):
         """Test custom Amazon patterns."""
@@ -90,6 +105,7 @@ class TestConfig:
         config = Config()
         assert isinstance(config.ynab, YNABConfig)
         assert isinstance(config.amazon, AmazonConfig)
+        assert isinstance(config.monarch, MonarchConfig)
         assert isinstance(config.categorization, CategorizationConfig)
         assert isinstance(config.payees, PayeesConfig)
 
@@ -137,6 +153,7 @@ class TestLoadConfig:
         assert config.ynab.api_token == "toml-token"
         assert config.ynab.budget_id == "toml-budget"
         assert config.amazon.username == "toml@example.com"
+        assert config.monarch.enabled is False
         assert config.categorization.date_match_window_days == 5
         assert config.payees.amazon_patterns == ["AMAZON", "AMZN"]
 
@@ -149,6 +166,7 @@ class TestLoadConfig:
         monkeypatch.setenv("YNAB_API_TOKEN", "env-token")
         monkeypatch.setenv("YNAB_BUDGET_ID", "env-budget")
         monkeypatch.setenv("AMAZON_USERNAME", "env@example.com")
+        monkeypatch.setenv("MONARCH_ENABLED", "true")
         monkeypatch.setenv("DATE_MATCH_WINDOW_DAYS", "10")
 
         config = load_config(config_path)
@@ -157,6 +175,7 @@ class TestLoadConfig:
         assert config.ynab.api_token == "env-token"
         assert config.ynab.budget_id == "env-budget"
         assert config.amazon.username == "env@example.com"
+        assert config.monarch.enabled is True
         assert config.categorization.date_match_window_days == 10
 
     def test_env_vars_without_toml(self, tmp_path, monkeypatch):

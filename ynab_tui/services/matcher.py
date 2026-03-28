@@ -41,6 +41,7 @@ class TransactionMatcher:
         self._db = db
         self._window_days = categorization_config.date_match_window_days
         self._amazon_patterns = [p.upper() for p in payees_config.amazon_patterns]
+        self._target_patterns = [p.upper() for p in getattr(payees_config, "target_patterns", [])]
         # Delegate to AmazonOrderMatcher for actual matching logic
         # Accept injected matcher for testability
         self._amazon_matcher = amazon_matcher or AmazonOrderMatcher(db)
@@ -55,10 +56,13 @@ class TransactionMatcher:
             AmazonOrder domain model.
         """
         return AmazonOrder(
-            order_id=cached.order_id,
+            external_id=cached.order_id,
             order_date=cached.order_date,
             total=cached.total,
             items=[OrderItem(name=name) for name in cached.items],
+            source=cached.source,
+            retailer=cached.retailer,
+            source_metadata=cached.source_metadata,
             from_cache=True,
             fetched_at=cached.fetched_at,
         )
@@ -83,18 +87,28 @@ class TransactionMatcher:
             category_id=txn.category_id,
             category_name=txn.category_name,
             approved=txn.approved,
+            retailer=txn.retailer or self.identify_retailer(txn),
         )
 
-    def is_amazon_transaction(self, transaction: Transaction) -> bool:
-        """Check if a transaction is from Amazon.
+    def identify_retailer(self, transaction: Transaction) -> Optional[str]:
+        """Identify the retailer associated with a transaction payee.
 
         Args:
             transaction: Transaction to check.
 
         Returns:
-            True if payee matches an Amazon pattern.
+            Retailer slug if recognized.
         """
-        return is_amazon_payee(transaction.payee_name, self._amazon_patterns)
+        payee_name = transaction.payee_name or ""
+        if is_amazon_payee(payee_name, self._amazon_patterns):
+            return "amazon"
+        if is_amazon_payee(payee_name, self._target_patterns):
+            return "target"
+        return None
+
+    def is_amazon_transaction(self, transaction: Transaction) -> bool:
+        """Check if a transaction is from Amazon."""
+        return self.identify_retailer(transaction) == "amazon"
 
     def enrich_transaction(self, transaction: Transaction) -> Transaction:
         """Enrich a transaction with Amazon order data if applicable.
@@ -105,18 +119,21 @@ class TransactionMatcher:
         Returns:
             Transaction with Amazon data populated if matched.
         """
-        # Mark if this is an Amazon transaction
-        transaction.is_amazon = self.is_amazon_transaction(transaction)
+        retailer = self.identify_retailer(transaction)
+        transaction.retailer = retailer
+        transaction.is_retail = retailer is not None
 
-        if not transaction.is_amazon:
+        if not transaction.is_retail:
             return transaction
 
         # Try to find matching Amazon order
         match = self.find_order_match(transaction)
 
         if match:
-            transaction.amazon_order_id = match.order.order_id
-            transaction.amazon_items = match.order.item_names
+            transaction.retail_order_id = match.order.order_id
+            transaction.retail_items = match.order.item_names
+            transaction.retail_source = match.order.source
+            transaction.retailer = match.order.retailer
 
         return transaction
 
@@ -140,38 +157,47 @@ class TransactionMatcher:
         if not transactions:
             return transactions
 
-        # Mark Amazon status and collect Amazon transactions to enrich
-        amazon_txns_to_enrich = []
+        # Mark retail status and collect retail transactions to enrich
+        retail_txns_to_enrich = []
         for t in transactions:
-            t.is_amazon = self.is_amazon_transaction(t)
-            if t.is_amazon:
-                amazon_txns_to_enrich.append(t)
+            t.retailer = self.identify_retailer(t)
+            t.is_retail = t.retailer is not None
+            if t.is_retail:
+                retail_txns_to_enrich.append(t)
 
-        if not amazon_txns_to_enrich:
+        if not retail_txns_to_enrich:
             return transactions
 
         try:
-            # Query ALL Amazon transactions from DB (including approved)
+            # Query ALL retail transactions from DB (including approved)
             # This ensures orders matched to approved transactions aren't re-matched
-            all_amazon_rows = self._db.get_ynab_transactions(payee_filter="amazon")
-            all_amazon_txn_infos = [
+            all_rows = self._db.get_ynab_transactions()
+            all_retail_txn_infos = [
                 self._db_row_to_txn_info(row)
-                for row in all_amazon_rows
-                if is_amazon_payee(row.get("payee_name", ""), self._amazon_patterns)
+                for row in all_rows
+                if self.identify_retailer(
+                    Transaction(
+                        id=row.get("id", ""),
+                        date=datetime.now(),
+                        amount=row.get("amount", 0),
+                        payee_name=row.get("payee_name", "") or "",
+                    )
+                )
+                is not None
             ]
 
-            if not all_amazon_txn_infos:
+            if not all_retail_txn_infos:
                 # Fallback: just use the transactions we're enriching
-                all_amazon_txn_infos = [self._transaction_to_info(t) for t in amazon_txns_to_enrich]
+                all_retail_txn_infos = [self._transaction_to_info(t) for t in retail_txns_to_enrich]
 
-            # Get all orders for the date range of ALL Amazon transactions
-            orders = self._amazon_matcher.get_orders_for_date_range(all_amazon_txn_infos)
+            # Get all orders for the date range of ALL retail transactions
+            orders = self._amazon_matcher.get_orders_for_date_range(all_retail_txn_infos)
             if not orders:
                 return transactions
 
-            # Batch match ALL Amazon transactions for proper duplicate detection
+            # Batch match ALL retail transactions for proper duplicate detection
             result = self._amazon_matcher.match_transactions(
-                all_amazon_txn_infos, orders, all_transactions=all_amazon_txn_infos
+                all_retail_txn_infos, orders, all_transactions=all_retail_txn_infos
             )
 
             # Build lookup from all match types
@@ -193,15 +219,17 @@ class TransactionMatcher:
                     # Fallback: don't set combo_items_lookup, will use order.items
 
             # Apply matches only to the transactions we're enriching
-            for txn in amazon_txns_to_enrich:
+            for txn in retail_txns_to_enrich:
                 cached_order = match_lookup.get(txn.id)
                 if cached_order:
-                    txn.amazon_order_id = cached_order.order_id
+                    txn.retail_order_id = cached_order.order_id
+                    txn.retail_source = cached_order.source
+                    txn.retailer = cached_order.retailer
                     # Use distributed items for combo matches, else all order items
                     if txn.id in combo_items_lookup:
-                        txn.amazon_items = combo_items_lookup[txn.id]
+                        txn.retail_items = combo_items_lookup[txn.id]
                     else:
-                        txn.amazon_items = cached_order.items
+                        txn.retail_items = cached_order.items
         except Exception as e:
             logger.debug("Failed to batch enrich transactions: %s", e)
 
@@ -223,7 +251,7 @@ class TransactionMatcher:
             Dict mapping transaction_id to list of item names.
         """
         # Get items with prices from database
-        items_with_prices = self._db.get_amazon_order_items_with_prices(order_id)
+        items_with_prices = self._db.get_retail_order_items_with_prices(order_id)
 
         if not items_with_prices:
             # No price info, can't distribute intelligently
@@ -295,6 +323,14 @@ class TransactionMatcher:
             category_id=row.get("category_id"),
             category_name=row.get("category_name"),
             approved=row.get("approved", False),
+            retailer=self.identify_retailer(
+                Transaction(
+                    id=row.get("id", ""),
+                    date=txn_date,
+                    amount=row.get("amount", 0),
+                    payee_name=row.get("payee_name", "") or "",
+                )
+            ),
         )
 
     def find_order_match(self, transaction: Transaction) -> Optional[OrderMatch]:
@@ -310,7 +346,10 @@ class TransactionMatcher:
         Returns:
             OrderMatch if found, None otherwise.
         """
-        if not self.is_amazon_transaction(transaction):
+        retailer = self.identify_retailer(transaction)
+        transaction.retailer = retailer
+        transaction.is_retail = retailer is not None
+        if not transaction.is_retail:
             return None
 
         try:
@@ -365,9 +404,9 @@ class TransactionMatcher:
         # First, enrich all transactions
         enriched = self.enrich_transactions(transactions)
 
-        # Find matches for Amazon transactions
+        # Find matches for retail transactions
         for txn in enriched:
-            if txn.is_amazon and txn.amazon_order_id:
+            if txn.is_retail and txn.retail_order_id:
                 match = self.find_order_match(txn)
                 if match:
                     matches[txn.id] = match

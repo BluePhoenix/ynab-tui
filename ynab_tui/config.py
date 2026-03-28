@@ -40,6 +40,17 @@ class AmazonConfig:
 
 
 @dataclass
+class MonarchConfig:
+    """Monarch retail enrichment configuration."""
+
+    enabled: bool = False
+    session_file: str = ""
+    session_token: str = ""
+    sync_lookback_days: int = 90
+    retailers: list[str] = field(default_factory=lambda: ["amazon", "target"])
+
+
+@dataclass
 class CategorizationConfig:
     """Categorization behavior configuration."""
 
@@ -55,6 +66,7 @@ class PayeesConfig:
     amazon_patterns: list[str] = field(
         default_factory=lambda: ["AMAZON", "AMZN", "Amazon.com", "AMAZON MKTPLACE"]
     )
+    target_patterns: list[str] = field(default_factory=lambda: ["TARGET"])
 
 
 @dataclass
@@ -98,6 +110,7 @@ class Config:
 
     ynab: YNABConfig = field(default_factory=YNABConfig)
     amazon: AmazonConfig = field(default_factory=AmazonConfig)
+    monarch: MonarchConfig = field(default_factory=MonarchConfig)
     categorization: CategorizationConfig = field(default_factory=CategorizationConfig)
     payees: PayeesConfig = field(default_factory=PayeesConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
@@ -110,7 +123,11 @@ class Config:
 
     def __post_init__(self):
         """Ensure data directory exists."""
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Test sandboxes may not allow writing to the default home config path.
+            pass
 
     @property
     def db_path(self) -> Path:
@@ -145,6 +162,14 @@ def _get_env_int(key: str, default: int) -> int:
     return default
 
 
+def _get_env_bool(key: str, default: bool) -> bool:
+    """Get environment variable as bool with fallback."""
+    val = os.environ.get(key)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def load_config(config_path: Optional[Path] = None) -> Config:
     """Load configuration from TOML file with environment variable overrides.
 
@@ -161,6 +186,9 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         - AMAZON_USERNAME: Amazon username
         - AMAZON_PASSWORD: Amazon password
         - AMAZON_OTP_SECRET: Amazon TOTP secret for 2FA
+        - MONARCH_ENABLED: Enable Monarch sync
+        - MONARCH_SESSION_FILE: Path to Monarch session file
+        - MONARCH_SESSION_TOKEN: Monarch session token
         - DATE_MATCH_WINDOW_DAYS: Days for fuzzy date matching
     """
     toml_data: dict = {}
@@ -205,6 +233,17 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         earliest_history_year=amazon_data.get("earliest_history_year", 2006),
     )
 
+    monarch_data = toml_data.get("monarch", {})
+    monarch = MonarchConfig(
+        enabled=_get_env_bool("MONARCH_ENABLED", monarch_data.get("enabled", False)),
+        session_file=_get_env("MONARCH_SESSION_FILE", monarch_data.get("session_file", "")),
+        session_token=_get_env("MONARCH_SESSION_TOKEN", monarch_data.get("session_token", "")),
+        sync_lookback_days=_get_env_int(
+            "MONARCH_SYNC_LOOKBACK_DAYS", monarch_data.get("sync_lookback_days", 90)
+        ),
+        retailers=monarch_data.get("retailers", ["amazon", "target"]),
+    )
+
     cat_data = toml_data.get("categorization", {})
     categorization = CategorizationConfig(
         date_match_window_days=_get_env_int(
@@ -218,7 +257,8 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     payees = PayeesConfig(
         amazon_patterns=payees_data.get(
             "amazon_patterns", ["AMAZON", "AMZN", "Amazon.com", "AMAZON MKTPLACE"]
-        )
+        ),
+        target_patterns=payees_data.get("target_patterns", ["TARGET"]),
     )
 
     display_data = toml_data.get("display", {})
@@ -248,6 +288,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     return Config(
         ynab=ynab,
         amazon=amazon,
+        monarch=monarch,
         categorization=categorization,
         payees=payees,
         display=display,

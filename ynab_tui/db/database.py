@@ -119,6 +119,16 @@ class Database:
                     total REAL NOT NULL,
                     fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS retail_orders_cache (
+                    source TEXT NOT NULL,
+                    retailer TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    order_date DATE NOT NULL,
+                    total REAL NOT NULL,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    source_metadata TEXT,
+                    PRIMARY KEY (source, external_id)
+                );
                 CREATE TABLE IF NOT EXISTS ynab_transactions (
                     id TEXT PRIMARY KEY,
                     budget_id TEXT,
@@ -152,6 +162,17 @@ class Database:
                     category_id TEXT,
                     category_name TEXT,
                     FOREIGN KEY (order_id) REFERENCES amazon_orders_cache(order_id)
+                );
+                CREATE TABLE IF NOT EXISTS retail_order_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    item_name TEXT NOT NULL,
+                    item_price REAL,
+                    quantity INTEGER DEFAULT 1,
+                    category_id TEXT,
+                    category_name TEXT,
+                    FOREIGN KEY (source, external_id) REFERENCES retail_orders_cache(source, external_id)
                 );
                 CREATE TABLE IF NOT EXISTS amazon_item_category_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,6 +230,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_pending_changes_txn ON pending_changes(transaction_id);
                 CREATE INDEX IF NOT EXISTS idx_payee_normalized ON categorization_history(payee_normalized);
                 CREATE INDEX IF NOT EXISTS idx_order_date ON amazon_orders_cache(order_date);
+                CREATE INDEX IF NOT EXISTS idx_retail_order_date ON retail_orders_cache(order_date);
+                CREATE INDEX IF NOT EXISTS idx_retail_order_retailer ON retail_orders_cache(retailer);
                 CREATE INDEX IF NOT EXISTS idx_ynab_date ON ynab_transactions(date);
                 CREATE INDEX IF NOT EXISTS idx_ynab_payee ON ynab_transactions(payee_name);
                 CREATE INDEX IF NOT EXISTS idx_ynab_category ON ynab_transactions(category_id);
@@ -217,6 +240,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_ynab_parent ON ynab_transactions(parent_transaction_id);
                 CREATE INDEX IF NOT EXISTS idx_amazon_item_order ON amazon_order_items(order_id);
                 CREATE INDEX IF NOT EXISTS idx_amazon_item_name ON amazon_order_items(item_name);
+                CREATE INDEX IF NOT EXISTS idx_retail_item_order ON retail_order_items(source, external_id);
+                CREATE INDEX IF NOT EXISTS idx_retail_item_name ON retail_order_items(item_name);
                 CREATE INDEX IF NOT EXISTS idx_item_cat_history_name ON amazon_item_category_history(item_name_normalized);
                 CREATE INDEX IF NOT EXISTS idx_category_group ON ynab_categories(group_id);
                 CREATE INDEX IF NOT EXISTS idx_category_name ON ynab_categories(name);
@@ -315,12 +340,32 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_cat_history_date ON categorization_history(transaction_date)"
         )
 
+        # Migrate legacy Amazon cache into generic retail cache
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO retail_orders_cache
+            (source, retailer, external_id, order_date, total, fetched_at)
+            SELECT 'amazon', 'amazon', order_id, order_date, total, fetched_at
+            FROM amazon_orders_cache
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO retail_order_items
+            (source, external_id, item_name, item_price, quantity, category_id, category_name)
+            SELECT 'amazon', order_id, item_name, item_price, quantity, category_id, category_name
+            FROM amazon_order_items
+            """
+        )
+
     def clear_all(self) -> dict[str, int]:
         """Clear all data from all tables."""
         counts = {}
         tables = [
             "ynab_categories",
             "ynab_transactions",
+            "retail_order_items",
+            "retail_orders_cache",
             "amazon_orders_cache",
             "amazon_order_items",
             "amazon_item_category_history",
@@ -785,54 +830,118 @@ class Database:
     # Amazon Methods
     # =========================================================================
 
+    def cache_retail_order(
+        self,
+        source: str,
+        retailer: str,
+        external_id: str,
+        order_date: datetime,
+        total: float,
+        source_metadata: Optional[dict[str, Any]] = None,
+    ) -> tuple[bool, bool]:
+        """Cache a retailer order to avoid re-fetching."""
+        with self._connection() as conn:
+            existing = conn.execute(
+                """SELECT external_id, order_date, total, source_metadata
+                FROM retail_orders_cache WHERE source = ? AND external_id = ?""",
+                (source, external_id),
+            ).fetchone()
+            new_date = _date_str(order_date)
+            metadata_json = json.dumps(source_metadata) if source_metadata else None
+            if existing:
+                data_changed = (
+                    existing["order_date"] != new_date
+                    or existing["total"] != total
+                    or existing["source_metadata"] != metadata_json
+                )
+                if data_changed:
+                    conn.execute(
+                        """UPDATE retail_orders_cache
+                        SET retailer=?, order_date=?, total=?, fetched_at=?, source_metadata=?
+                        WHERE source=? AND external_id=?""",
+                        (retailer, new_date, total, _now_iso(), metadata_json, source, external_id),
+                    )
+                return (False, data_changed)
+            conn.execute(
+                """INSERT INTO retail_orders_cache
+                (source, retailer, external_id, order_date, total, fetched_at, source_metadata)
+                VALUES (?,?,?,?,?,?,?)""",
+                (source, retailer, external_id, new_date, total, _now_iso(), metadata_json),
+            )
+            return (True, True)
+
     def cache_amazon_order(
         self, order_id: str, order_date: datetime, total: float
     ) -> tuple[bool, bool]:
         """Cache an Amazon order to avoid re-scraping."""
+        inserted, changed = self.cache_retail_order(
+            source="amazon",
+            retailer="amazon",
+            external_id=order_id,
+            order_date=order_date,
+            total=total,
+        )
         with self._connection() as conn:
-            existing = conn.execute(
-                "SELECT order_id, order_date, total FROM amazon_orders_cache WHERE order_id = ?",
-                (order_id,),
-            ).fetchone()
-            new_date = _date_str(order_date)
-            if existing:
-                data_changed = existing["order_date"] != new_date or existing["total"] != total
-                if data_changed:
-                    conn.execute(
-                        "UPDATE amazon_orders_cache SET order_date=?, total=?, fetched_at=? WHERE order_id=?",
-                        (new_date, total, _now_iso(), order_id),
-                    )
-                return (False, data_changed)
-            else:
-                conn.execute(
-                    "INSERT INTO amazon_orders_cache (order_id, order_date, total, fetched_at) VALUES (?,?,?,?)",
-                    (order_id, new_date, total, _now_iso()),
-                )
-                return (True, True)
+            conn.execute(
+                "INSERT OR REPLACE INTO amazon_orders_cache (order_id, order_date, total, fetched_at) VALUES (?,?,?,?)",
+                (order_id, _date_str(order_date), total, _now_iso()),
+            )
+        return (inserted, changed)
+
+    def _row_to_cached_order(self, row: sqlite3.Row) -> AmazonOrderCache:
+        """Convert a retail cache row to a typed cache model."""
+        metadata = json.loads(row["source_metadata"]) if row["source_metadata"] else None
+        return AmazonOrderCache(
+            order_id=row["external_id"],
+            order_date=datetime.strptime(row["order_date"], "%Y-%m-%d")
+            if row["order_date"]
+            else datetime.min,
+            total=row["total"],
+            items=row["items"].split("||") if row["items"] else [],
+            fetched_at=datetime.fromisoformat(row["fetched_at"]),
+            source=row["source"],
+            retailer=row["retailer"],
+            source_metadata=metadata,
+        )
+
+    def get_cached_retail_orders_by_date_range(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        retailers: Optional[list[str]] = None,
+        sources: Optional[list[str]] = None,
+    ) -> list[AmazonOrderCache]:
+        """Get cached retail orders within a date range."""
+        conditions = ["c.order_date BETWEEN ? AND ?"]
+        params: list[Any] = [_date_str(start_date), _date_str(end_date)]
+        if retailers:
+            conditions.append(f"c.retailer IN ({','.join('?' for _ in retailers)})")
+            params.extend(retailers)
+        if sources:
+            conditions.append(f"c.source IN ({','.join('?' for _ in sources)})")
+            params.extend(sources)
+
+        query = f"""
+            SELECT c.source, c.retailer, c.external_id, c.order_date, c.total, c.fetched_at,
+                   c.source_metadata, GROUP_CONCAT(i.item_name, '||') as items
+            FROM retail_orders_cache c
+            LEFT JOIN retail_order_items i
+                ON c.source = i.source AND c.external_id = i.external_id
+            WHERE {' AND '.join(conditions)}
+            GROUP BY c.source, c.external_id
+            ORDER BY c.order_date DESC
+        """
+        with self._connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            return [self._row_to_cached_order(row) for row in rows]
 
     def get_cached_orders_by_date_range(
         self, start_date: datetime, end_date: datetime
     ) -> list[AmazonOrderCache]:
         """Get cached Amazon orders within a date range."""
-        with self._connection() as conn:
-            rows = conn.execute(
-                """SELECT c.order_id, c.order_date, c.total, c.fetched_at, GROUP_CONCAT(i.item_name, '||') as items
-                FROM amazon_orders_cache c LEFT JOIN amazon_order_items i ON c.order_id = i.order_id
-                WHERE c.order_date BETWEEN ? AND ? GROUP BY c.order_id ORDER BY c.order_date DESC""",
-                (_date_str(start_date), _date_str(end_date)),
-            ).fetchall()
-            return [
-                AmazonOrderCache(
-                    order_id=row["order_id"],
-                    order_date=datetime.strptime(row["order_date"], "%Y-%m-%d")
-                    if row["order_date"]
-                    else datetime.min,
-                    total=row["total"],
-                    items=row["items"].split("||") if row["items"] else [],
-                    fetched_at=datetime.fromisoformat(row["fetched_at"]),
-                )
-                for row in rows
-            ]
+        return self.get_cached_retail_orders_by_date_range(
+            start_date, end_date, retailers=["amazon"], sources=["amazon"]
+        )
 
     def get_cached_orders_for_year(self, year: int) -> list[AmazonOrderCache]:
         """Get cached Amazon orders for a specific year."""
@@ -842,38 +951,94 @@ class Database:
         self, amount: float, date: datetime, window_days: int = 3, tolerance: float = 0.01
     ) -> Optional[AmazonOrderCache]:
         """Find a cached order matching amount and date."""
+        return self.get_cached_retail_order_by_amount(
+            amount, date, window_days=window_days, tolerance=tolerance, retailers=["amazon"]
+        )
+
+    def get_cached_retail_order_by_amount(
+        self,
+        amount: float,
+        date: datetime,
+        window_days: int = 3,
+        tolerance: float = 0.01,
+        retailers: Optional[list[str]] = None,
+    ) -> Optional[AmazonOrderCache]:
+        """Find a cached retail order matching amount and date."""
         start, end = date - timedelta(days=window_days), date + timedelta(days=window_days)
+        conditions = ["order_date BETWEEN ? AND ?", "ABS(total - ?) <= ?"]
+        params: list[Any] = [_date_str(start), _date_str(end), amount, tolerance]
+        if retailers:
+            conditions.append(f"retailer IN ({','.join('?' for _ in retailers)})")
+            params.extend(retailers)
         with self._connection() as conn:
             order_row = conn.execute(
-                """SELECT order_id, order_date, total, fetched_at FROM amazon_orders_cache
-                WHERE order_date BETWEEN ? AND ? AND ABS(total - ?) <= ?
-                ORDER BY ABS(total - ?) ASC, ABS(julianday(order_date) - julianday(?)) ASC LIMIT 1""",
-                (_date_str(start), _date_str(end), amount, tolerance, amount, _date_str(date)),
+                f"""SELECT source, retailer, external_id, order_date, total, fetched_at, source_metadata
+                FROM retail_orders_cache
+                WHERE {' AND '.join(conditions)}
+                ORDER BY ABS(total - ?) ASC,
+                         CASE WHEN source='monarch' THEN 0 ELSE 1 END,
+                         ABS(julianday(order_date) - julianday(?)) ASC
+                LIMIT 1""",
+                tuple(params + [amount, _date_str(date)]),
             ).fetchone()
             if not order_row:
                 return None
             item_rows = conn.execute(
-                "SELECT item_name FROM amazon_order_items WHERE order_id = ?",
-                (order_row["order_id"],),
+                "SELECT item_name FROM retail_order_items WHERE source = ? AND external_id = ?",
+                (order_row["source"], order_row["external_id"]),
             ).fetchall()
             return AmazonOrderCache(
-                order_id=order_row["order_id"],
+                order_id=order_row["external_id"],
                 order_date=datetime.strptime(order_row["order_date"], "%Y-%m-%d")
                 if order_row["order_date"]
                 else datetime.min,
                 total=order_row["total"],
                 items=[r["item_name"] for r in item_rows],
                 fetched_at=datetime.fromisoformat(order_row["fetched_at"]),
+                source=order_row["source"],
+                retailer=order_row["retailer"],
+                source_metadata=json.loads(order_row["source_metadata"])
+                if order_row["source_metadata"]
+                else None,
             )
 
     def get_cached_order(self, order_id: str) -> Optional[dict[str, Any]]:
         """Get a cached Amazon order by ID."""
+        return self.get_cached_retail_order("amazon", order_id)
+
+    def get_cached_retail_order(self, source: str, external_id: str) -> Optional[dict[str, Any]]:
+        """Get a cached retail order by source and external ID."""
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT order_id, order_date, total FROM amazon_orders_cache WHERE order_id = ?",
-                (order_id,),
+                """SELECT source, retailer, external_id, order_date, total, source_metadata
+                FROM retail_orders_cache WHERE source = ? AND external_id = ?""",
+                (source, external_id),
             ).fetchone()
             return dict(row) if row else None
+
+    def upsert_retail_order_items(
+        self, source: str, external_id: str, items: list[dict[str, Any]]
+    ) -> int:
+        """Store retail order items for category matching."""
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM retail_order_items WHERE source = ? AND external_id = ?",
+                (source, external_id),
+            )
+            for item in items:
+                conn.execute(
+                    """INSERT INTO retail_order_items
+                    (source, external_id, item_name, item_price, quantity)
+                    VALUES (?,?,?,?,?)""",
+                    (
+                        source,
+                        external_id,
+                        item.get("name", "Unknown"),
+                        item.get("price"),
+                        item.get("quantity", 1),
+                    ),
+                )
+            return len(items)
 
     def upsert_amazon_order_items(self, order_id: str, items: list[dict[str, Any]]) -> int:
         """Store Amazon order items for category matching."""
@@ -889,17 +1054,29 @@ class Database:
                         item.get("quantity", 1),
                     ),
                 )
-            return len(items)
+        return self.upsert_retail_order_items("amazon", order_id, items)
 
-    def get_amazon_order_items_with_prices(self, order_id: str) -> list[dict[str, Any]]:
-        """Get order items with prices for split transaction matching."""
+    def get_retail_order_items_with_prices(
+        self, external_id: str, source: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Get retailer order items with prices for split transaction matching."""
+        conditions = ["external_id = ?"]
+        params: list[Any] = [external_id]
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT item_name, item_price, quantity FROM amazon_order_items WHERE order_id=? ORDER BY item_price DESC",
-                (order_id,),
+                f"""SELECT source, item_name, item_price, quantity
+                FROM retail_order_items
+                WHERE {' AND '.join(conditions)}
+                ORDER BY item_price DESC""",
+                tuple(params),
             ).fetchall()
             return [
                 {
+                    "source": r["source"],
                     "item_name": r["item_name"],
                     "item_price": r["item_price"],
                     "quantity": r["quantity"],
@@ -907,18 +1084,44 @@ class Database:
                 for r in rows
             ]
 
-    def get_order_count(self) -> int:
-        return self._count("amazon_orders_cache")
-
-    def get_order_item_count(self) -> int:
-        return self._count("amazon_order_items")
-
-    def get_order_date_range(self) -> tuple[Optional[str], Optional[str]]:
-        """Get earliest and latest Amazon order dates."""
+    def get_amazon_order_items_with_prices(self, order_id: str) -> list[dict[str, Any]]:
+        """Get order items with prices for split transaction matching."""
+        rows = self.get_retail_order_items_with_prices(order_id, source="amazon")
+        if rows:
+            return rows
         with self._connection() as conn:
-            row = conn.execute(
-                "SELECT MIN(order_date) as earliest, MAX(order_date) as latest FROM amazon_orders_cache"
-            ).fetchone()
+            legacy_rows = conn.execute(
+                """SELECT 'amazon' as source, item_name, item_price, quantity
+                FROM amazon_order_items WHERE order_id=? ORDER BY item_price DESC""",
+                (order_id,),
+            ).fetchall()
+            return [dict(r) for r in legacy_rows]
+
+    def get_order_count(self, source: Optional[str] = "amazon") -> int:
+        if source is None:
+            return self._count("retail_orders_cache")
+        return self._count("retail_orders_cache", "source = ?", (source,))
+
+    def get_order_item_count(self, source: Optional[str] = "amazon") -> int:
+        if source is None:
+            return self._count("retail_order_items")
+        return self._count("retail_order_items", "source = ?", (source,))
+
+    def get_order_date_range(
+        self, source: Optional[str] = "amazon"
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Get earliest and latest order dates."""
+        with self._connection() as conn:
+            if source is None:
+                row = conn.execute(
+                    "SELECT MIN(order_date) as earliest, MAX(order_date) as latest FROM retail_orders_cache"
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """SELECT MIN(order_date) as earliest, MAX(order_date) as latest
+                    FROM retail_orders_cache WHERE source = ?""",
+                    (source,),
+                ).fetchone()
             if row and row["earliest"]:
                 return (row["earliest"][:10], row["latest"][:10])
             return (None, None)

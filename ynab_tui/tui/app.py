@@ -165,11 +165,11 @@ class TransactionListItem(ListItem):
                 status_flags += "!"
             status = status_flags.ljust(w.status)
 
-        # Format enrichment on second line(s) - only show Amazon items
+        # Format enrichment on second line(s) - show itemized retail enrichment
         enrichment = ""
-        if txn.is_amazon and txn.amazon_items:
+        if txn.is_retail and txn.retail_items:
             indent = w.date + w.col_spacing
-            lines = [f"{'':{indent}}[dim]↳ {item[:60]}[/dim]" for item in txn.amazon_items]
+            lines = [f"{'':{indent}}[dim]↳ {item[:60]}[/dim]" for item in txn.retail_items]
             enrichment = "\n" + "\n".join(lines)
 
         return (
@@ -814,7 +814,7 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
             # Get category suggestions based on history
             suggested = self._categorizer.get_category_suggestions(
                 payee_name=txn.payee_name,
-                amazon_items=txn.amazon_items if txn.is_amazon else None,
+                amazon_items=txn.retail_items if txn.is_retail else None,
             )
 
             summary = TransactionSummary(
@@ -823,7 +823,7 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
                 amount=txn.display_amount,
                 current_category=current_category_display,
                 current_category_id=txn.category_id if txn.category_id else None,
-                amazon_items=txn.amazon_items if txn.is_amazon else None,
+                amazon_items=txn.retail_items if txn.is_retail else None,
                 suggested_categories=suggested if suggested else None,
             )
 
@@ -981,23 +981,24 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
         self.run_worker(self._load_transactions, exclusive=True)  # type: ignore[arg-type]
 
     def action_split(self) -> None:
-        """Open split screen for Amazon transactions."""
+        """Open split screen for retail transactions with itemized enrichment."""
         txn = self._get_selected_transaction()
         if not txn:
             self.notify("No transaction selected", severity="warning")
             return
 
-        if not txn.is_amazon:
-            self.notify("Split mode is only for Amazon transactions", severity="warning")
+        if not txn.is_retail:
+            self.notify("Split mode is only for enriched retail transactions", severity="warning")
             return
 
-        if not txn.amazon_order_id:
-            self.notify("No Amazon order linked to this transaction", severity="warning")
+        if not txn.retail_order_id:
+            self.notify("No retail order linked to this transaction", severity="warning")
             return
 
         # Get items with prices via service layer
-        all_items_with_prices = self._categorizer.get_amazon_order_items_with_prices(
-            txn.amazon_order_id
+        all_items_with_prices = self._categorizer.get_retail_order_items_with_prices(
+            txn.retail_order_id,
+            source=txn.retail_source,
         )
 
         if not all_items_with_prices:
@@ -1005,9 +1006,9 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
             return
 
         # For combo matches, filter to only items assigned to this transaction
-        # txn.amazon_items contains the distributed items for this specific transaction
-        if txn.amazon_items:
-            assigned_item_names = set(txn.amazon_items)
+        # txn.retail_items contains the distributed items for this specific transaction
+        if txn.retail_items:
+            assigned_item_names = set(txn.retail_items)
             items_with_prices = [
                 item
                 for item in all_items_with_prices

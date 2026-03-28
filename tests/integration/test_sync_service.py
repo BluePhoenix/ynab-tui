@@ -23,6 +23,9 @@ class MockOrder:
     order_date: datetime
     total: float
     items: list = field(default_factory=list)
+    source: str = "amazon"
+    retailer: str = "amazon"
+    source_metadata: dict | None = None
 
 
 @dataclass
@@ -164,6 +167,23 @@ class MockAmazonClient:
         return [o for o in self.orders if o.order_date >= cutoff]
 
 
+class MockMonarchClient:
+    """Mock Monarch client for testing."""
+
+    def __init__(self):
+        self.orders: list[MockOrder] = []
+        self.get_recent_calls: list[int] = []
+        self.fail_with: Exception | None = None
+
+    def get_recent_orders(self, days: int = 30) -> list[MockOrder]:
+        """Return mock recent retail orders."""
+        self.get_recent_calls.append(days)
+        if self.fail_with:
+            raise self.fail_with
+        cutoff = datetime.now() - timedelta(days=days)
+        return [o for o in self.orders if o.order_date >= cutoff]
+
+
 def make_transaction(
     id: str = "txn-001",
     date: datetime | None = None,
@@ -208,14 +228,24 @@ def mock_amazon() -> MockAmazonClient:
 
 
 @pytest.fixture
+def mock_monarch() -> MockMonarchClient:
+    """Create mock Monarch client."""
+    return MockMonarchClient()
+
+
+@pytest.fixture
 def sync_service(
-    temp_db: Database, mock_ynab: MockYNABClient, mock_amazon: MockAmazonClient
+    temp_db: Database,
+    mock_ynab: MockYNABClient,
+    mock_amazon: MockAmazonClient,
+    mock_monarch: MockMonarchClient,
 ) -> SyncService:
     """Create sync service."""
     return SyncService(
         db=temp_db,
         ynab=mock_ynab,
         amazon=mock_amazon,
+        monarch=mock_monarch,
         categorization_config=CategorizationConfig(),
         amazon_config=AmazonConfig(earliest_history_year=2024),
     )
@@ -705,11 +735,62 @@ class TestPullCategories:
         assert result.total >= 2
 
 
+class TestPullMonarch:
+    """Tests for pull_monarch method."""
+
+    def test_pulls_monarch_orders(
+        self, temp_db: Database, mock_ynab: MockYNABClient, mock_monarch: MockMonarchClient
+    ) -> None:
+        """Can pull Monarch retail enrichment data."""
+        mock_monarch.orders = [
+            MockOrder(
+                "m1",
+                datetime.now() - timedelta(days=2),
+                64.99,
+                items=[MockOrderItem("Target Lamp", 64.99)],
+            )
+        ]
+        service = SyncService(temp_db, mock_ynab, monarch=mock_monarch)
+
+        result = service.pull_monarch(since_days=30)
+
+        assert result.success is True
+        assert result.fetched == 1
+        assert temp_db.get_order_count(source="monarch") == 1
+        items = temp_db.get_retail_order_items_with_prices("m1", source="monarch")
+        assert len(items) == 1
+        assert items[0]["item_name"] == "Target Lamp"
+
+    def test_monarch_pull_soft_failure(
+        self, temp_db: Database, mock_ynab: MockYNABClient, mock_monarch: MockMonarchClient
+    ) -> None:
+        """Monarch failures should be reported without clearing existing cache."""
+        temp_db.cache_retail_order(
+            source="monarch",
+            retailer="amazon",
+            external_id="existing",
+            order_date=datetime.now() - timedelta(days=1),
+            total=19.99,
+        )
+        mock_monarch.fail_with = RuntimeError("session expired")
+        service = SyncService(temp_db, mock_ynab, monarch=mock_monarch)
+
+        result = service.pull_monarch(since_days=30)
+
+        assert result.success is False
+        assert "session expired" in result.errors[0]
+        assert temp_db.get_order_count(source="monarch") == 1
+
+
 class TestPullAll:
     """Tests for pull_all method."""
 
     def test_pulls_all_sources(
-        self, temp_db: Database, mock_ynab: MockYNABClient, mock_amazon: MockAmazonClient
+        self,
+        temp_db: Database,
+        mock_ynab: MockYNABClient,
+        mock_amazon: MockAmazonClient,
+        mock_monarch: MockMonarchClient,
     ) -> None:
         """Pulls from categories, YNAB, and Amazon."""
         mock_ynab.transactions = [make_transaction()]
@@ -730,13 +811,15 @@ class TestPullAll:
             ]
         )
         mock_amazon.orders = []
+        mock_monarch.orders = []
 
-        service = SyncService(temp_db, mock_ynab, mock_amazon)
+        service = SyncService(temp_db, mock_ynab, mock_amazon, monarch=mock_monarch)
         results = service.pull_all()
 
         assert "categories" in results
         assert "ynab" in results
         assert "amazon" in results
+        assert "monarch" in results
         assert results["ynab"].fetched == 1
 
 
@@ -1077,29 +1160,46 @@ class TestGetStatus:
     """Tests for get_status method."""
 
     def test_returns_all_sources(
-        self, temp_db: Database, mock_ynab: MockYNABClient, mock_amazon: MockAmazonClient
+        self,
+        temp_db: Database,
+        mock_ynab: MockYNABClient,
+        mock_amazon: MockAmazonClient,
+        mock_monarch: MockMonarchClient,
     ) -> None:
         """Returns status for all sources."""
-        service = SyncService(temp_db, mock_ynab, mock_amazon)
+        service = SyncService(temp_db, mock_ynab, mock_amazon, monarch=mock_monarch)
         status = service.get_status()
 
         assert "categories" in status
         assert "ynab" in status
         assert "amazon" in status
+        assert "monarch" in status
 
     def test_includes_counts(
-        self, temp_db: Database, mock_ynab: MockYNABClient, mock_amazon: MockAmazonClient
+        self,
+        temp_db: Database,
+        mock_ynab: MockYNABClient,
+        mock_amazon: MockAmazonClient,
+        mock_monarch: MockMonarchClient,
     ) -> None:
         """Includes transaction and order counts."""
         # Add some data
         temp_db.upsert_ynab_transaction(make_transaction("txn-1"))
         temp_db.upsert_ynab_transaction(make_transaction("txn-2", category_id=None))
+        temp_db.cache_retail_order(
+            source="monarch",
+            retailer="target",
+            external_id="m-status",
+            order_date=datetime.now(),
+            total=23.45,
+        )
 
-        service = SyncService(temp_db, mock_ynab, mock_amazon)
+        service = SyncService(temp_db, mock_ynab, mock_amazon, monarch=mock_monarch)
         status = service.get_status()
 
         assert status["ynab"]["transaction_count"] == 2
         assert status["ynab"]["uncategorized_count"] >= 1
+        assert status["monarch"]["order_count"] == 1
 
 
 class TestPullYnabErrors:

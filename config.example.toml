@@ -23,6 +23,14 @@ amount_tolerance = 0.10      # Dollar tolerance for amount matching
 recent_orders_days = 30      # Default lookback for recent orders
 earliest_history_year = 2006 # Start year for order history
 
+[monarch]
+# Optional Monarch retail enrichment source
+enabled = false
+session_file = ""   # or use env: MONARCH_SESSION_FILE
+session_token = ""  # or use env: MONARCH_SESSION_TOKEN
+sync_lookback_days = 90
+retailers = ["amazon", "target"]
+
 [categorization]
 date_match_window_days = 14       # Days for fuzzy date matching
 sync_overlap_days = 7             # Overlap for incremental syncs
@@ -40,6 +48,11 @@ amazon_patterns = [
     "KINDLE",
     "AUDIBLE",
     "WHOLE FOODS",
+]
+
+# Patterns to identify Target transactions
+target_patterns = [
+    "TARGET",
 ]
 
 [display]

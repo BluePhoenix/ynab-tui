@@ -2,7 +2,7 @@
 
 Orchestrates the full categorization workflow:
 1. Fetch uncategorized transactions from DB (synced via 'pull')
-2. Enrich Amazon transactions with order details
+2. Enrich retail transactions with order details
 3. Apply categories based on user selections
 
 DB-first architecture: Run 'pull' to sync data, then all operations use local SQLite.
@@ -100,12 +100,12 @@ class CategorizerService:
     ) -> list[dict]:
         """Get category suggestions based on historical patterns.
 
-        For Amazon transactions, looks up categories used for matched items.
-        For non-Amazon transactions, looks up categories used for the same payee.
+        For retail transactions, looks up categories used for matched items.
+        For non-retail transactions, looks up categories used for the same payee.
 
         Args:
             payee_name: The payee name for payee-based suggestions.
-            amazon_items: List of Amazon item names for item-based suggestions.
+            amazon_items: List of enriched item names for item-based suggestions.
             limit: Maximum number of suggestions to return.
 
         Returns:
@@ -115,13 +115,13 @@ class CategorizerService:
             - group_name: str (from category lookup)
             - count: int (total times used)
             - source: str ("payee" or "items")
-            - item_count: int (for Amazon, how many items matched)
+            - item_count: int (for retail, how many items matched)
         """
         suggestions: list[dict] = []
         sort_by = self.get_suggestion_sort()
 
         if amazon_items:
-            # Amazon transaction: look up item history
+            # Retail transaction: look up item history
             item_distributions = self._db.get_item_category_distributions_batch(amazon_items)
             if item_distributions:
                 # Aggregate across all items
@@ -430,7 +430,7 @@ class CategorizerService:
             category_name=category_name,
             category_id=category_id,
             amount=transaction.amount,
-            amazon_items=transaction.amazon_items if transaction.is_amazon else None,
+            amazon_items=transaction.retail_items if transaction.is_retail else None,
         )
 
         # Update the transaction object to reflect the change (for UI display)
@@ -631,14 +631,15 @@ class CategorizerService:
         return transaction
 
     def get_sync_status(self) -> dict[str, Optional[dict]]:
-        """Get sync status for YNAB and Amazon.
+        """Get sync status for YNAB and retail enrichment sources.
 
         Returns:
-            Dict with 'ynab' and 'amazon' sync states.
+            Dict with 'ynab', 'amazon', and 'monarch' sync states.
         """
         return {
             "ynab": self._db.get_sync_state("ynab"),
             "amazon": self._db.get_sync_state("amazon"),
+            "monarch": self._db.get_sync_state("monarch"),
         }
 
     def get_pending_changes(self) -> list[dict]:
@@ -659,6 +660,12 @@ class CategorizerService:
             List of item dicts with name, quantity, and price.
         """
         return self._db.get_amazon_order_items_with_prices(order_id)
+
+    def get_retail_order_items_with_prices(
+        self, order_id: str, source: Optional[str] = None
+    ) -> list[dict]:
+        """Get retail order items with prices for a specific order."""
+        return self._db.get_retail_order_items_with_prices(order_id, source=source)
 
     def get_pending_splits(self, transaction_id: str) -> list[dict]:
         """Get pending splits for a transaction.

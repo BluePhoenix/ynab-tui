@@ -46,7 +46,7 @@ class SubTransaction:
         return f"{sign}${abs(self.amount):,.2f}"
 
 
-@dataclass
+@dataclass(init=False)
 class Transaction:
     """Represents a YNAB transaction for categorization.
 
@@ -85,12 +85,74 @@ class Transaction:
     debt_transaction_type: Optional[str] = None  # 'payment', 'refund', 'fee', 'interest'
 
     # Enrichment fields (populated by our services)
-    is_amazon: bool = False
-    amazon_items: list[str] = field(default_factory=list)
-    amazon_order_id: Optional[str] = None
+    is_retail: bool = False
+    retail_items: list[str] = field(default_factory=list)
+    retail_order_id: Optional[str] = None
+    retail_source: Optional[str] = None
+    retailer: Optional[str] = None
 
     # Historical context
     payee_history_summary: Optional[str] = None  # e.g., "85% Groceries"
+
+    def __init__(
+        self,
+        id: str,
+        date: datetime,
+        amount: float,
+        payee_name: str,
+        payee_id: Optional[str] = None,
+        memo: Optional[str] = None,
+        account_name: Optional[str] = None,
+        account_id: Optional[str] = None,
+        category_id: Optional[str] = None,
+        category_name: Optional[str] = None,
+        approved: bool = False,
+        cleared: str = "uncleared",
+        is_split: bool = False,
+        subtransactions: Optional[list[SubTransaction]] = None,
+        sync_status: str = "synced",
+        transfer_account_id: Optional[str] = None,
+        transfer_account_name: Optional[str] = None,
+        debt_transaction_type: Optional[str] = None,
+        is_retail: bool = False,
+        retail_items: Optional[list] = None,
+        retail_order_id: Optional[str] = None,
+        retail_source: Optional[str] = None,
+        retailer: Optional[str] = None,
+        payee_history_summary: Optional[str] = None,
+        is_amazon: Optional[bool] = None,
+        amazon_items: Optional[list] = None,
+        amazon_order_id: Optional[str] = None,
+    ):
+        self.id = id
+        self.date = date
+        self.amount = amount
+        self.payee_name = payee_name
+        self.payee_id = payee_id
+        self.memo = memo
+        self.account_name = account_name
+        self.account_id = account_id
+        self.category_id = category_id
+        self.category_name = category_name
+        self.approved = approved
+        self.cleared = cleared
+        self.is_split = is_split
+        self.subtransactions = subtransactions or []
+        self.sync_status = sync_status
+        self.transfer_account_id = transfer_account_id
+        self.transfer_account_name = transfer_account_name
+        self.debt_transaction_type = debt_transaction_type
+        self.is_retail = is_retail
+        self.retail_items = list(retail_items or amazon_items or [])
+        self.retail_order_id = retail_order_id or amazon_order_id
+        self.retail_source = retail_source
+        self.retailer = retailer
+        self.payee_history_summary = payee_history_summary
+
+        if is_amazon is True:
+            self.is_retail = True
+            if not self.retailer:
+                self.retailer = "amazon"
 
     @property
     def is_transfer(self) -> bool:
@@ -143,11 +205,44 @@ class Transaction:
     @property
     def enrichment_summary(self) -> str:
         """Summary of enrichment data for display."""
-        if self.is_amazon and self.amazon_items:
-            return truncate_list_display(self.amazon_items)
+        if self.is_retail and self.retail_items:
+            return truncate_list_display(self.retail_items)
         elif self.payee_history_summary:
             return f"Historical: {self.payee_history_summary}"
         return ""
+
+    @property
+    def is_amazon(self) -> bool:
+        """Compatibility alias for Amazon-specific UI flows."""
+        return self.is_retail and self.retailer == "amazon"
+
+    @is_amazon.setter
+    def is_amazon(self, value: bool) -> None:
+        if value:
+            self.is_retail = True
+            if not self.retailer:
+                self.retailer = "amazon"
+        elif self.retailer == "amazon":
+            self.is_retail = False
+            self.retailer = None
+
+    @property
+    def amazon_items(self) -> list[str]:
+        """Compatibility alias for legacy Amazon item enrichment."""
+        return self.retail_items
+
+    @amazon_items.setter
+    def amazon_items(self, value: list[str]) -> None:
+        self.retail_items = value
+
+    @property
+    def amazon_order_id(self) -> Optional[str]:
+        """Compatibility alias for legacy Amazon order IDs."""
+        return self.retail_order_id
+
+    @amazon_order_id.setter
+    def amazon_order_id(self, value: Optional[str]) -> None:
+        self.retail_order_id = value
 
 
 @dataclass
