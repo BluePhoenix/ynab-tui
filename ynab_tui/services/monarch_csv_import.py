@@ -18,6 +18,9 @@ class MonarchCsvImportError(Exception):
     """Raised when a Monarch CSV import cannot be parsed."""
 
 
+_LINE_END_PRICE_RE = re.compile(r"^(?P<name>.+?)\s*-\s*\$(?P<price>\d+(?:\.\d{1,2})?)\s*$")
+
+
 def parse_monarch_csv(
     csv_path: str | Path,
     payees_config: PayeesConfig,
@@ -122,17 +125,17 @@ def _extract_items(row: dict[str, str], merchant: str) -> list[OrderItem]:
     if note_like:
         parts = re.split(r"[\n;|]+", note_like)
         for part in parts:
-            cleaned = _clean_item_text(part)
-            if cleaned:
-                items.append(OrderItem(name=cleaned))
+            parsed = _parse_item_line(part)
+            if parsed:
+                items.append(parsed)
 
     if not items:
         tags = _first_value(row, "tags", "tag")
         if tags:
             for part in tags.split(","):
-                cleaned = _clean_item_text(part)
-                if cleaned:
-                    items.append(OrderItem(name=cleaned))
+                parsed = _parse_item_line(part)
+                if parsed:
+                    items.append(parsed)
 
     if not items and merchant:
         items.append(OrderItem(name=merchant))
@@ -145,6 +148,32 @@ def _clean_item_text(value: str) -> str:
     if ":" in cleaned and cleaned.lower().startswith(("items", "item", "order")):
         _, cleaned = cleaned.split(":", 1)
     return cleaned.strip()
+
+
+def _parse_item_line(value: str) -> OrderItem | None:
+    cleaned = _clean_item_text(value)
+    if not cleaned:
+        return None
+
+    price = None
+    match = _LINE_END_PRICE_RE.match(cleaned)
+    if match:
+        cleaned = match.group("name").strip()
+        try:
+            price = float(match.group("price"))
+        except ValueError:
+            price = None
+
+    quantity = 1
+    qty_match = re.match(r"^(?P<qty>\d+)\s*x\s+(?P<rest>.+)$", cleaned, re.IGNORECASE)
+    if qty_match:
+        quantity = int(qty_match.group("qty"))
+        cleaned = qty_match.group("rest").strip()
+
+    if not cleaned:
+        return None
+
+    return OrderItem(name=cleaned, price=price, quantity=quantity)
 
 
 def _infer_retailer(text: str, payees_config: PayeesConfig) -> str | None:

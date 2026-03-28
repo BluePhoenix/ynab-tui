@@ -22,7 +22,7 @@ def test_parse_monarch_csv_extracts_items_from_notes(tmp_path: Path):
     csv_path = tmp_path / "monarch.csv"
     csv_path.write_text(
         "Date,Merchant,Amount,Notes,Tags,Transaction Type,ID\n"
-        "2026-03-01,Amazon Marketplace,-44.99,\"Items: Widget A\n- Widget B\",home,debit,txn-1\n"
+        "2026-03-01,Amazon Marketplace,-44.99,\"1 x Widget A - $12.49\n- Widget B - $9.99\nhttps://example.com/order/1\",home,debit,txn-1\n"
     )
 
     orders, metadata = parse_monarch_csv(csv_path, PayeesConfig(), MonarchConfig())
@@ -31,7 +31,11 @@ def test_parse_monarch_csv_extracts_items_from_notes(tmp_path: Path):
     assert orders[0].source == "monarch_csv"
     assert orders[0].retailer == "amazon"
     assert orders[0].external_id == "txn-1"
-    assert orders[0].item_names == ["Widget A", "Widget B"]
+    assert orders[0].item_names == ["Widget A", "Widget B", "https://example.com/order/1"]
+    assert orders[0].items[0].quantity == 1
+    assert orders[0].items[0].price == 12.49
+    assert orders[0].items[1].price == 9.99
+    assert orders[0].items[2].price is None
     assert metadata["retailers_detected"] == {"amazon": 1}
 
 
