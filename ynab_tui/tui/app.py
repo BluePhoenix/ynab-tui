@@ -165,11 +165,16 @@ class TransactionListItem(ListItem):
                 status_flags += "!"
             status = status_flags.ljust(w.status)
 
-        # Format enrichment on second line(s) - only show Amazon items
+        # Format enrichment on second line(s) - show itemized retail enrichment
         enrichment = ""
-        if txn.is_amazon and txn.amazon_items:
+        if txn.is_retail and txn.retail_items:
             indent = w.date + w.col_spacing
-            lines = [f"{'':{indent}}[dim]↳ {item[:60]}[/dim]" for item in txn.amazon_items]
+            available_width = self.size.width if self.size.width > 0 else w.total_width + 4
+            max_item_width = max(60, available_width - indent - 4)
+            lines = []
+            for item in txn.retail_items:
+                display_item = item if len(item) <= max_item_width else item[: max_item_width - 3] + "..."
+                lines.append(f"{'':{indent}}[dim]↳ {display_item}[/dim]")
             enrichment = "\n" + "\n".join(lines)
 
         return (
@@ -342,6 +347,9 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
         self._column_widths = ColumnWidths()
         # Display settings from config
         self._color_status_letters = categorizer.get_config().display.color_status_letters
+        # Guard against resize-triggered renders before the initial load completes
+        self._is_loading_transactions = False
+        self._has_loaded_transactions = False
 
     def _get_list_view(self) -> ListView | None:
         """Get the transactions ListView if it exists."""
@@ -417,6 +425,8 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
         new_widths = calculate_column_widths(event.size.width)
         if new_widths != self._column_widths:
             self._column_widths = new_widths
+            if self._is_loading_transactions or not self._has_loaded_transactions:
+                return
             # Re-render transactions with new widths
             self.run_worker(self._render_transactions, exclusive=True)  # type: ignore[arg-type]
 
@@ -446,6 +456,7 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
 
     async def _load_transactions(self) -> None:
         """Load transactions from YNAB based on current filter."""
+        self._is_loading_transactions = True
         # Clear existing content and show loading state
         container = self.query_one("#main-container")
         await container.remove_children()
@@ -472,9 +483,12 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
 
             # Update UI
             await self._render_transactions()
+            self._has_loaded_transactions = True
 
         except Exception as e:
             loading.update(f"Error: {e}")
+        finally:
+            self._is_loading_transactions = False
 
     async def _render_transactions(self) -> None:
         """Render the transactions list."""
@@ -814,7 +828,7 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
             # Get category suggestions based on history
             suggested = self._categorizer.get_category_suggestions(
                 payee_name=txn.payee_name,
-                amazon_items=txn.amazon_items if txn.is_amazon else None,
+                amazon_items=txn.retail_items if txn.is_retail else None,
             )
 
             summary = TransactionSummary(
@@ -823,7 +837,7 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
                 amount=txn.display_amount,
                 current_category=current_category_display,
                 current_category_id=txn.category_id if txn.category_id else None,
-                amazon_items=txn.amazon_items if txn.is_amazon else None,
+                amazon_items=txn.retail_items if txn.is_retail else None,
                 suggested_categories=suggested if suggested else None,
             )
 
@@ -847,7 +861,7 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
 
         # Use action handler for categorization
         action_result = self._action_handler.categorize(
-            txn, result.category_id, result.category_name
+            txn, result.category_id, result.category_name, auto_retail_memo=True
         )
 
         if action_result.success:
@@ -981,23 +995,24 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
         self.run_worker(self._load_transactions, exclusive=True)  # type: ignore[arg-type]
 
     def action_split(self) -> None:
-        """Open split screen for Amazon transactions."""
+        """Open split screen for retail transactions with itemized enrichment."""
         txn = self._get_selected_transaction()
         if not txn:
             self.notify("No transaction selected", severity="warning")
             return
 
-        if not txn.is_amazon:
-            self.notify("Split mode is only for Amazon transactions", severity="warning")
+        if not txn.is_retail:
+            self.notify("Split mode is only for enriched retail transactions", severity="warning")
             return
 
-        if not txn.amazon_order_id:
-            self.notify("No Amazon order linked to this transaction", severity="warning")
+        if not txn.retail_order_id:
+            self.notify("No retail order linked to this transaction", severity="warning")
             return
 
         # Get items with prices via service layer
-        all_items_with_prices = self._categorizer.get_amazon_order_items_with_prices(
-            txn.amazon_order_id
+        all_items_with_prices = self._categorizer.get_retail_order_items_with_prices(
+            txn.retail_order_id,
+            source=txn.retail_source,
         )
 
         if not all_items_with_prices:
@@ -1005,9 +1020,9 @@ class YNABCategorizerApp(ListViewNavigationMixin, App):
             return
 
         # For combo matches, filter to only items assigned to this transaction
-        # txn.amazon_items contains the distributed items for this specific transaction
-        if txn.amazon_items:
-            assigned_item_names = set(txn.amazon_items)
+        # txn.retail_items contains the distributed items for this specific transaction
+        if txn.retail_items:
+            assigned_item_names = set(txn.retail_items)
             items_with_prices = [
                 item
                 for item in all_items_with_prices

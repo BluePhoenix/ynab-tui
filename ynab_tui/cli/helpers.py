@@ -154,7 +154,13 @@ def get_sync_service(ctx: Context) -> SyncService:
     Returns:
         SyncService instance.
     """
-    from ..clients import AmazonClient, MockAmazonClient, MockYNABClient, YNABClient
+    from ..clients import (
+        AmazonClient,
+        MockAmazonClient,
+        MockYNABClient,
+        MonarchClient,
+        YNABClient,
+    )
     from ..db.database import Database
     from ..services.sync import SyncService
 
@@ -185,10 +191,19 @@ def get_sync_service(ctx: Context) -> SyncService:
         elif cfg.amazon.username and cfg.amazon.password:
             amazon_client = AmazonClient(cfg.amazon, db)
 
+        monarch_client: MonarchClient | None = None
+        if not mock and cfg.monarch.enabled and (cfg.monarch.session_file or cfg.monarch.session_token):
+            monarch_client = MonarchClient(cfg.monarch)
+
         # Set budget_id on database so transactions are stored with correct budget
         db.budget_id = ynab_client.get_current_budget_id()
 
-        ctx.obj["sync_service"] = SyncService(db=db, ynab=ynab_client, amazon=amazon_client)
+        ctx.obj["sync_service"] = SyncService(
+            db=db,
+            ynab=ynab_client,
+            amazon=amazon_client,
+            monarch=monarch_client,
+        )
 
         # Register cleanup callback to close database when context is torn down
         ctx.call_on_close(lambda: db.close())

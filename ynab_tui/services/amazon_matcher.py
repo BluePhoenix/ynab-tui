@@ -11,6 +11,15 @@ from ..db.database import AmazonOrderCache, Database
 __all__ = ["AmazonMatchResult", "AmazonOrderMatcher", "TransactionInfo"]
 
 
+def _source_priority(source: str | None) -> int:
+    priorities = {"monarch": 0, "monarch_csv": 1, "amazon": 2}
+    return priorities.get(source or "amazon", 99)
+
+
+def _order_key(order: AmazonOrderCache) -> tuple[str, str]:
+    return (getattr(order, "source", "amazon"), order.order_id)
+
+
 @dataclass
 class TransactionInfo:
     """Normalized transaction data for matching.
@@ -29,6 +38,7 @@ class TransactionInfo:
     category_id: str | None = None
     category_name: str | None = None
     approved: bool = False
+    retailer: str | None = None
     raw_data: dict[str, Any] | None = field(default=None, repr=False)
 
 
@@ -76,14 +86,18 @@ def find_best_order_match(
 ) -> Optional[AmazonOrderCache]:
     """Find best matching order for a transaction within date window."""
     exclude_order_ids = exclude_order_ids or set()
-    best_match, best_date_diff = None, float("inf")
+    best_match, best_score = None, (float("inf"), 1, float("inf"))
     for order in orders:
         if order.order_id in exclude_order_ids:
             continue
+        if txn_info.retailer and getattr(order, "retailer", None) not in (None, txn_info.retailer):
+            continue
         if abs(order.total - txn_info.amount) <= amount_tolerance:
             date_diff = abs((txn_info.date - order.order_date).days)
-            if date_diff <= window_days and date_diff < best_date_diff:
-                best_match, best_date_diff = order, date_diff
+            source_priority = _source_priority(getattr(order, "source", "amazon"))
+            score = (date_diff, source_priority, abs(order.total - txn_info.amount))
+            if date_diff <= window_days and score < best_score:
+                best_match, best_score = order, score
     return best_match
 
 
@@ -99,6 +113,8 @@ def find_unmatched_orders(
         if order.total == 0:
             continue
         has_match = any(
+            (txn.retailer is None or getattr(order, "retailer", None) in (None, txn.retailer))
+            and
             abs(order.total - txn.amount) <= amount_tolerance
             and abs((txn.date - order.order_date).days) <= window_days
             for txn in all_transactions
@@ -136,7 +152,10 @@ def find_combo_matches(
         # Filter out already-used transactions before finding nearby ones
         available_txns = [t for t in unmatched_txns if t.transaction_id not in used_txn_ids]
         nearby_txns = [
-            t for t in available_txns if abs((t.date - order.order_date).days) <= window_days
+            t
+            for t in available_txns
+            if abs((t.date - order.order_date).days) <= window_days
+            and (t.retailer is None or getattr(order, "retailer", None) in (None, t.retailer))
         ]
         if len(nearby_txns) < 2:
             continue
@@ -176,19 +195,24 @@ def match_transactions_two_stage(
     stage1_candidates = []
     for txn_info in transactions:
         for order in orders:
+            if txn_info.retailer and getattr(order, "retailer", None) not in (None, txn_info.retailer):
+                continue
             amount_diff = abs(order.total - txn_info.amount)
             if amount_diff <= amount_tolerance:
                 date_diff = abs((txn_info.date - order.order_date).days)
                 if date_diff <= stage1_window:
                     stage1_candidates.append((txn_info, order, amount_diff, date_diff))
-    stage1_candidates.sort(key=lambda x: (x[2], x[3]))
+    stage1_candidates.sort(
+        key=lambda x: (x[2], x[3], _source_priority(getattr(x[1], "source", "amazon")))
+    )
 
     for txn_info, order, _, _ in stage1_candidates:
         if txn_info.transaction_id in matched_txn_ids:
             continue
-        if order.order_id not in matched_order_ids:
+        order_key = _order_key(order)
+        if order_key not in matched_order_ids:
             stage1_matches.append((txn_info, order))
-            matched_order_ids.add(order.order_id)
+            matched_order_ids.add(order_key)
             matched_txn_ids.add(txn_info.transaction_id)
         else:
             duplicate_matches.append((txn_info, order))
@@ -200,19 +224,24 @@ def match_transactions_two_stage(
     stage2_candidates = []
     for txn_info in stage1_unmatched:
         for order in orders:
+            if txn_info.retailer and getattr(order, "retailer", None) not in (None, txn_info.retailer):
+                continue
             amount_diff = abs(order.total - txn_info.amount)
             if amount_diff <= amount_tolerance:
                 date_diff = abs((txn_info.date - order.order_date).days)
                 if date_diff <= stage2_window:
                     stage2_candidates.append((txn_info, order, amount_diff, date_diff))
-    stage2_candidates.sort(key=lambda x: (x[2], x[3]))
+    stage2_candidates.sort(
+        key=lambda x: (x[2], x[3], _source_priority(getattr(x[1], "source", "amazon")))
+    )
 
     for txn_info, order, _, _ in stage2_candidates:
         if txn_info.transaction_id in matched_txn_ids:
             continue
-        if order.order_id not in matched_order_ids:
+        order_key = _order_key(order)
+        if order_key not in matched_order_ids:
             stage2_matches.append((txn_info, order))
-            matched_order_ids.add(order.order_id)
+            matched_order_ids.add(order_key)
             matched_txn_ids.add(txn_info.transaction_id)
         else:
             duplicate_matches.append((txn_info, order))
@@ -227,7 +256,7 @@ def match_transactions_two_stage(
     )
 
     # Filter combo-matched items
-    combo_order_ids = {order.order_id for order, _ in combo_matches}
+    combo_order_ids = {_order_key(order) for order, _ in combo_matches}
     combo_txn_keys = {(t.date_str, t.amount) for _, txns in combo_matches for t in txns}
 
     return AmazonMatchResult(
@@ -238,12 +267,12 @@ def match_transactions_two_stage(
         unmatched_transactions=[
             t for t in unmatched_txns if (t.date_str, t.amount) not in combo_txn_keys
         ],
-        unmatched_orders=[o for o in unmatched_orders if o.order_id not in combo_order_ids],
+        unmatched_orders=[o for o in unmatched_orders if _order_key(o) not in combo_order_ids],
     )
 
 
 class AmazonOrderMatcher:
-    """Service for matching YNAB transactions to Amazon orders."""
+    """Service for matching YNAB transactions to cached retail orders."""
 
     def __init__(
         self,
@@ -256,7 +285,7 @@ class AmazonOrderMatcher:
         """Initialize matcher.
 
         Args:
-            order_repo: Database for Amazon order queries.
+            order_repo: Database for cached retail order queries.
             amazon_config: Amazon configuration (provides defaults for windows/tolerance).
             stage1_window: Days for first-pass strict matching (overrides config).
             stage2_window: Days for extended matching window (overrides config).
@@ -294,6 +323,7 @@ class AmazonOrderMatcher:
             category_id=txn.get("category_id"),
             category_name=txn.get("category_name"),
             approved=txn.get("approved", False),
+            retailer=txn.get("retailer"),
             raw_data=txn,
         )
 
@@ -346,4 +376,4 @@ class AmazonOrderMatcher:
         if not transactions:
             return []
         start_date, end_date = calculate_date_range(transactions, self.stage2_window)
-        return self._order_repo.get_cached_orders_by_date_range(start_date, end_date)
+        return self._order_repo.get_cached_retail_orders_by_date_range(start_date, end_date)
