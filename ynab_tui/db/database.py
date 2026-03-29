@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 
+from ..utils import normalize_memo
 from .models import AmazonOrderCache, CategorizationRecord, TransactionFilter
 
 if TYPE_CHECKING:
@@ -1451,7 +1452,7 @@ class Database:
                 params.append(new_values["approved"])
             if "memo" in new_values:
                 updates.append("memo = ?")
-                params.append(new_values["memo"])
+                params.append(normalize_memo(new_values["memo"]))
             params.append(transaction_id)
             conn.execute(f"UPDATE ynab_transactions SET {', '.join(updates)} WHERE id = ?", params)
             conn.execute("DELETE FROM pending_changes WHERE transaction_id = ?", (transaction_id,))

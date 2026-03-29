@@ -13,6 +13,7 @@ from ynab_tui.config import AmazonConfig, CategorizationConfig
 from ynab_tui.db.database import Database
 from ynab_tui.models import Category, CategoryGroup, CategoryList, Transaction
 from ynab_tui.services.sync import PullResult, PushResult, SyncService
+from ynab_tui.utils import YNAB_MEMO_MAX_LENGTH
 
 
 @dataclass
@@ -1108,6 +1109,34 @@ class TestPushFieldPreservation:
         # Verify memo preserved in DB
         stored = temp_db.get_ynab_transaction("txn-with-memo")
         assert stored["memo"] == "Important note"
+
+    def test_push_truncates_existing_pending_memo_to_ynab_limit(
+        self, temp_db: Database, mock_ynab: MockYNABClient, mock_amazon: MockAmazonClient
+    ) -> None:
+        """Oversized pending memos should be clamped before push and local apply."""
+        long_memo = "Girls clothing | " + ("x" * 600)
+        txn = make_transaction(
+            id="txn-long-memo",
+            approved=False,
+        )
+        txn.memo = None
+        mock_ynab.transactions = [txn]
+        temp_db.upsert_ynab_transaction(txn)
+        temp_db.create_pending_change(
+            "txn-long-memo",
+            {"memo": long_memo, "approved": True},
+            {"memo": None, "approved": False},
+            "update",
+        )
+
+        service = SyncService(temp_db, mock_ynab, mock_amazon)
+        result = service.push_ynab()
+
+        assert result.succeeded == 1
+        call = mock_ynab.update_calls[0]
+        assert call["memo"] == long_memo[:YNAB_MEMO_MAX_LENGTH]
+        stored = temp_db.get_ynab_transaction("txn-long-memo")
+        assert stored["memo"] == long_memo[:YNAB_MEMO_MAX_LENGTH]
 
 
 class TestBuildPushSummary:

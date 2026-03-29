@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from ...services import CategorizerService
 
 # Default widths for push preview (without account column)
-_DEFAULT_WIDTHS = ColumnWidths(payee=24, category=32, account=0)
+_DEFAULT_WIDTHS = ColumnWidths(payee=24, category=46, account=0)
 
 
 class PushChangeItem(ListItem):
@@ -301,6 +301,16 @@ class PushPreviewScreen(ListViewNavigationMixin, Screen):
             "pushed_ids": result.pushed_ids,
         }
 
+    def _notify_plain(
+        self,
+        message: str,
+        *,
+        severity: str = "information",
+        timeout: float | None = None,
+    ) -> None:
+        """Show a notification without interpreting Textual markup."""
+        self.notify(message, severity=severity, timeout=timeout, markup=False)
+
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """Handle worker state changes."""
         if event.state == WorkerState.SUCCESS:
@@ -320,7 +330,7 @@ class PushPreviewScreen(ListViewNavigationMixin, Screen):
                 )
                 # Show all errors so users can see what failed
                 for error in result["errors"]:
-                    self.notify(error, severity="error", timeout=10)
+                    self._notify_plain(error, severity="error", timeout=10)
 
             # Pop screen first
             self.app.pop_screen()
@@ -333,7 +343,7 @@ class PushPreviewScreen(ListViewNavigationMixin, Screen):
 
         elif event.state == WorkerState.ERROR:
             self._hide_progress_bar()
-            self.notify(f"Push failed: {event.worker.error}", severity="error")
+            self._notify_plain(f"Push failed: {event.worker.error}", severity="error")
             self._pushing = False
             self._update_status("Push failed - press Enter to retry or q/Esc to cancel")
 

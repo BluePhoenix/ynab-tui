@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from ynab_tui.config import AmazonConfig, CategorizationConfig, MonarchConfig, PayeesConfig
 from ynab_tui.services.monarch_csv_import import MonarchCsvImportError, parse_monarch_csv
+from ynab_tui.utils import normalize_memo
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,14 @@ class SyncService:
                 logger.debug("Failed to fetch Amazon orders for year %d: %s", year, e)
         return orders
 
+    @staticmethod
+    def _normalize_pending_values(new_values: dict[str, Any]) -> dict[str, Any]:
+        """Return a copy of pending values normalized for YNAB constraints."""
+        normalized = dict(new_values)
+        if "memo" in normalized:
+            normalized["memo"] = normalize_memo(normalized["memo"])
+        return normalized
+
     def _compute_expected_transaction(
         self,
         local_txn: dict,
@@ -194,7 +203,7 @@ class SyncService:
             Dict with expected values for key fields.
         """
         expected = dict(local_txn)  # Copy local state
-        new_values = pending_change.get("new_values", {})
+        new_values = self._normalize_pending_values(pending_change.get("new_values", {}))
 
         # Fallback to legacy columns if new_values is empty
         if not new_values:
@@ -908,7 +917,9 @@ class SyncService:
                                 )
                     else:
                         # Generic update - handles category, memo, approval
-                        new_values = change.get("new_values", {})
+                        new_values = self._normalize_pending_values(
+                            change.get("new_values", {})
+                        )
 
                         # Fallback to legacy columns if new_values is empty
                         if not new_values:

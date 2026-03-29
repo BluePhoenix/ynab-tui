@@ -21,7 +21,7 @@ from ..models import (
     Transaction,
     TransactionBatch,
 )
-from ..utils import parse_to_datetime
+from ..utils import normalize_memo, parse_to_datetime
 from .matcher import TransactionMatcher
 
 if TYPE_CHECKING:
@@ -607,6 +607,8 @@ class CategorizerService:
         Returns:
             Updated transaction.
         """
+        memo = normalize_memo(memo) or ""
+
         # Get original values (preserves first originals if already pending)
         originals = self._get_original_values(transaction, ["memo"])
 

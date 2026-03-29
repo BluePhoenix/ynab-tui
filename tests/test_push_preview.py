@@ -1,6 +1,9 @@
 """Tests for push preview screen."""
 
+from unittest.mock import Mock
+
 from ynab_tui.tui.screens.push_preview import PushChangeItem
+from ynab_tui.tui.screens.push_preview import PushPreviewScreen
 
 
 def test_push_change_item_format_transfer_incoming():
@@ -75,3 +78,19 @@ def test_push_change_item_format_non_transfer():
 
     # Should show category change (may be truncated, so check for "Software")
     assert "Software" in row
+
+
+def test_push_preview_notify_plain_disables_markup():
+    """Plain-text push notifications should disable Textual markup parsing."""
+    screen = PushPreviewScreen(categorizer=Mock(), changes=[])
+    screen.notify = Mock()
+    error = "Failed to push txn-1: Error validating memo [input_value='Girls clothing | 1 x Item - $6.29']"
+
+    screen._notify_plain(error, severity="error", timeout=10)
+
+    screen.notify.assert_called_once_with(
+        error,
+        severity="error",
+        timeout=10,
+        markup=False,
+    )

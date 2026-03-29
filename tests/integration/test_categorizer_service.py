@@ -12,6 +12,7 @@ from ynab_tui.config import CategorizationConfig, Config, DisplayConfig, PayeesC
 from ynab_tui.db.database import Database
 from ynab_tui.models import CategoryGroup, CategoryList, Transaction
 from ynab_tui.services.categorizer import CategorizerService
+from ynab_tui.utils import YNAB_MEMO_MAX_LENGTH
 
 
 class MockYNABClient:
@@ -540,6 +541,25 @@ class TestApplyRetailMemo:
 
         assert changed is False
         assert txn.memo is None
+
+    def test_truncates_memo_to_ynab_limit(
+        self, temp_db: Database, mock_ynab: MockYNABClient
+    ) -> None:
+        """Retail memo auto-fill should stay within YNAB's 500-char limit."""
+        txn = make_transaction(memo="Start")
+        txn.is_retail = True
+        txn.retail_items = ["A" * 300, "B" * 300]
+        temp_db.upsert_ynab_transaction(txn)
+
+        categorizer = CategorizerService(make_config(), mock_ynab, temp_db)
+
+        changed = categorizer.apply_retail_memo_if_needed(txn)
+
+        assert changed is True
+        assert len(txn.memo or "") == YNAB_MEMO_MAX_LENGTH
+        pending = temp_db.get_pending_change(txn.id)
+        assert pending is not None
+        assert len(pending["new_values"]["memo"]) == YNAB_MEMO_MAX_LENGTH
 
 
 class TestSyncStatus:
